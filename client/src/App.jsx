@@ -15,7 +15,10 @@ import AdminPortal from './components/AdminPortal';
 import SettingsScreen from './components/SettingsScreen';
 import StatusScreen from './components/StatusScreen';
 import AuthScreen from './components/AuthScreen';
+import AppUpdateModal from './components/AppUpdateModal';
 import { Smartphone, Monitor } from 'lucide-react';
+
+const APP_VERSION = '1.0.0';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -41,10 +44,31 @@ export default function App() {
   const [activeGroupCall, setActiveGroupCall] = useState(null);
   const [incomingCall, setIncomingCall] = useState(null);
   
-  // Modals
+  // Modals & In-App Updates
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(window.location.hash === '#admin');
+  const [updateInfo, setUpdateInfo] = useState(null);
+
+  // Check for app updates against backend /api/app-version
+  const checkForAppUpdates = async (manual = false) => {
+    try {
+      const res = await fetch('/api/app-version');
+      const data = await res.json();
+      if (data && data.latestVersion) {
+        const isNewer = data.latestVersion !== APP_VERSION;
+        const dismissed = sessionStorage.getItem('glasschat_update_dismissed') === data.latestVersion;
+        if (isNewer && (!dismissed || manual)) {
+          setUpdateInfo(data);
+        } else if (manual) {
+          alert(`✨ GlassChat is up to date (v${APP_VERSION})`);
+        }
+      }
+    } catch (e) {
+      console.warn('App update check notice:', e);
+      if (manual) alert('Could not reach update server. Check your connection.');
+    }
+  };
   
   // Responsive mode: auto-detect real mobile phones and Capacitor APK
   const isActualMobile = typeof window !== 'undefined' && (
@@ -131,6 +155,9 @@ export default function App() {
         localStorage.removeItem('glasschat_user');
       }
     }
+
+    // Check for in-app updates on startup
+    checkForAppUpdates(false);
 
     return () => window.removeEventListener('hashchange', handleHash);
   }, []);
@@ -296,7 +323,20 @@ export default function App() {
       }
     };
 
+    const handleCallInvitation = (data) => {
+      console.log('Incoming call invitation received:', data);
+      setIncomingAlert({
+        id: `invite_${Date.now()}`,
+        senderName: data.fromName || 'Contact',
+        text: `📞 Invited you to join their live ${data.isVideo ? 'video' : 'audio'} call!`,
+        action: () => {
+          handleStartCall({ id: data.from, name: data.fromName, avatar: data.fromAvatar }, data.isVideo);
+        }
+      });
+    };
+
     socket.on('incoming-call', handleIncomingCall);
+    socket.on('incoming-call-invitation', handleCallInvitation);
     socket.on('user-status-changed', handleUserStatus);
     socket.on('user-registered', handleNewUser);
     socket.on('user-updated', handleUserUpdated);
@@ -307,6 +347,7 @@ export default function App() {
 
     return () => {
       socket.off('incoming-call', handleIncomingCall);
+      socket.off('incoming-call-invitation', handleCallInvitation);
       socket.off('user-status-changed', handleUserStatus);
       socket.off('user-registered', handleNewUser);
       socket.off('user-updated', handleUserUpdated);
@@ -915,6 +956,8 @@ export default function App() {
                   onOpenAdmin={() => setIsAdminOpen(true)}
                   onUpdateAvatar={handleUpdateAvatar}
                   onUpdateUser={setCurrentUser}
+                  onCheckForUpdates={() => checkForAppUpdates(true)}
+                  appVersion={APP_VERSION}
                 />
               )}
             </div>
@@ -936,6 +979,7 @@ export default function App() {
             onEndCall={handleEnd1on1Call}
             currentUser={currentUser}
             socket={socket}
+            contacts={contacts}
           />
         )}
 
@@ -983,6 +1027,18 @@ export default function App() {
             savedContactsMap={savedContactsMap}
             onSaveContact={handleSaveContact}
             onSyncContacts={handleSyncContacts}
+          />
+        )}
+
+        {/* In-App Auto Update Checker Modal */}
+        {updateInfo && (
+          <AppUpdateModal
+            updateInfo={updateInfo}
+            currentVersion={APP_VERSION}
+            onClose={() => {
+              sessionStorage.setItem('glasschat_update_dismissed', updateInfo.latestVersion);
+              setUpdateInfo(null);
+            }}
           />
         )}
       </main>

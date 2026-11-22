@@ -78,6 +78,24 @@ export function setupCallHandlers(io, socket, userSocketMap) {
     }
   });
 
+  // Invite an additional participant into a live call
+  socket.on('invite-to-call', ({ targetUserId, fromUser, isVideo = false, currentParticipants = [] }) => {
+    const targetSocketId = userSocketMap.get(targetUserId);
+    console.log(`[Call] ${fromUser?.name} inviting ${targetUserId} to ongoing call`);
+    const destination = targetSocketId || targetUserId;
+    if (destination) {
+      io.to(destination).emit('incoming-call-invitation', {
+        from: fromUser?.id,
+        fromName: fromUser?.name,
+        fromAvatar: fromUser?.avatar,
+        isVideo,
+        currentParticipants,
+        callType: isVideo ? 'video' : 'audio',
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
 
   // ==========================================
   // GROUP AUDIO & VIDEO CALL SIGNALING (SFU / MESH)

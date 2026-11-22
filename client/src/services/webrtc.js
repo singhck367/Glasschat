@@ -18,19 +18,24 @@ export const ICE_SERVERS = {
 };
 
 // Get local audio and/or video stream from device camera & microphone
-export async function getLocalUserMedia(video = true, audio = true) {
+export async function getLocalUserMedia(video = true, audio = true, facingMode = 'user') {
   // Attempt 1: Standard constraints
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: video ? {
         width: { ideal: 1280 },
         height: { ideal: 720 },
-        facingMode: 'user'
+        facingMode: facingMode
       } : false,
       audio: audio ? {
         echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: true
+        autoGainControl: true,
+        googEchoCancellation: true,
+        googAutoGainControl: true,
+        googNoiseSuppression: true,
+        googHighpassFilter: true,
+        channelCount: 1
       } : false
     });
     return stream;
@@ -39,7 +44,7 @@ export async function getLocalUserMedia(video = true, audio = true) {
     // Attempt 2: Simplified constraints without advanced audio flags (fixes Android OverconstrainedError)
     try {
       const simpleStream = await navigator.mediaDevices.getUserMedia({
-        video: video ? true : false,
+        video: video ? { facingMode } : false,
         audio: audio ? true : false
       });
       return simpleStream;
@@ -60,6 +65,49 @@ export async function getLocalUserMedia(video = true, audio = true) {
       return createSimulatedStream(video);
     }
   }
+}
+
+// Switch between Front (user) and Back (environment) camera
+export async function switchCameraStream(currentStream, facingMode = 'environment') {
+  try {
+    if (currentStream) {
+      currentStream.getVideoTracks().forEach(t => t.stop());
+    }
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: { ideal: facingMode }
+      },
+      audio: false
+    });
+    return newStream.getVideoTracks()[0];
+  } catch (err) {
+    console.warn('[WebRTC] Primary camera switch failed, trying generic facingMode:', err);
+    try {
+      const fallbackStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode },
+        audio: false
+      });
+      return fallbackStream.getVideoTracks()[0];
+    } catch (err2) {
+      console.error('[WebRTC] All camera switch attempts failed:', err2);
+      throw err2;
+    }
+  }
+}
+
+// Get Screen Share / Screen Cast stream
+export async function getDisplayMediaStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    throw new Error('Screen sharing is not supported on this browser or platform.');
+  }
+  return await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      cursor: 'always'
+    },
+    audio: true
+  });
 }
 
 // Fallback simulated stream for environments without webcams / test environments

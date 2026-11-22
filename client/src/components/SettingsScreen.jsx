@@ -13,7 +13,9 @@ export default function SettingsScreen({
   onLogout, 
   onOpenAdmin,
   onUpdateAvatar,
-  onUpdateUser 
+  onUpdateUser,
+  onCheckForUpdates,
+  appVersion = '1.0.0'
 }) {
   // Modal states
   const [activeModal, setActiveModal] = useState(null); // 'profile' | 'broadcast' | 'account' | 'privacy' | 'chats' | 'appearance' | 'storage'
@@ -362,6 +364,69 @@ export default function SettingsScreen({
           </span>
         </div>
       )}
+
+      {/* 3.5 APP UPDATES & VERSION CARD */}
+      <div 
+        onClick={onCheckForUpdates}
+        className="glass-card" 
+        style={{
+          padding: '14px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          cursor: 'pointer',
+          borderRadius: '18px',
+          background: 'linear-gradient(135deg, rgba(2, 132, 199, 0.08) 0%, rgba(99, 102, 241, 0.08) 100%)',
+          border: '1px solid rgba(2, 132, 199, 0.25)',
+          transition: 'all 0.2s ease'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{
+            width: '38px',
+            height: '38px',
+            borderRadius: '12px',
+            background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 4px 12px rgba(2, 132, 199, 0.3)'
+          }}>
+            <Sparkles size={20} color="#ffffff" />
+          </div>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <h4 style={{ fontSize: '14px', fontWeight: '800', margin: 0, color: 'var(--text-primary)' }}>
+                App Updates & Info
+              </h4>
+              <span className="glass-pill" style={{ padding: '1px 6px', fontSize: '10px', fontWeight: '800', color: '#0284c7', backgroundColor: 'rgba(2, 132, 199, 0.15)' }}>
+                v{appVersion}
+              </span>
+            </div>
+            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '2px 0 0 0' }}>
+              Tap to check for latest updates & features
+            </p>
+          </div>
+        </div>
+
+        <button 
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onCheckForUpdates?.();
+          }}
+          className="glass-btn glass-btn-primary"
+          style={{
+            padding: '6px 12px',
+            fontSize: '11px',
+            fontWeight: '700',
+            borderRadius: '10px',
+            height: '32px'
+          }}
+        >
+          Check Now
+        </button>
+      </div>
 
       {/* 4. LOGOUT BUTTON */}
       <button 
