@@ -605,6 +605,16 @@ export default function ChatRoom({
     setRecordingSeconds(0);
   };
 
+  const [audioPlaybackRate, setAudioPlaybackRate] = useState(1);
+
+  const handleToggleAudioSpeed = () => {
+    const nextSpeed = audioPlaybackRate === 1 ? 1.5 : audioPlaybackRate === 1.5 ? 2 : 1;
+    setAudioPlaybackRate(nextSpeed);
+    if (currentAudioRef.current) {
+      currentAudioRef.current.playbackRate = nextSpeed;
+    }
+  };
+
   // Toggle audio playback
   const togglePlayAudio = (msgId, audioUrl) => {
     if (playingAudioId === msgId) {
@@ -615,6 +625,7 @@ export default function ChatRoom({
         currentAudioRef.current.pause();
       }
       const audio = new Audio(audioUrl);
+      audio.playbackRate = audioPlaybackRate;
       currentAudioRef.current = audio;
       audio.onended = () => setPlayingAudioId(null);
       audio.onerror = () => setPlayingAudioId(null);
@@ -1129,9 +1140,31 @@ export default function ChatRoom({
                           />
                         ))}
                       </div>
-                      <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: '600' }}>
-                        {msg.text || 'Voice Note'}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px' }}>
+                        <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: '600' }}>
+                          {msg.text || 'Voice Note'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleAudioSpeed();
+                          }}
+                          className="glass-pill"
+                          style={{
+                            padding: '1px 7px',
+                            fontSize: '10px',
+                            fontWeight: '800',
+                            backgroundColor: 'rgba(2, 132, 199, 0.15)',
+                            color: '#0284c7',
+                            border: '1px solid rgba(2, 132, 199, 0.3)',
+                            cursor: 'pointer'
+                          }}
+                          title="Change playback speed (1x, 1.5x, 2x)"
+                        >
+                          {audioPlaybackRate}x
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}

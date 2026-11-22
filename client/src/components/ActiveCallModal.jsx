@@ -1,10 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   PhoneOff, Mic, MicOff, Video, VideoOff, Volume2, Volume1,
-  SwitchCamera, ScreenShare, UserPlus, ArrowLeftRight, X, Search, Check, Sparkles
+  SwitchCamera, ScreenShare, UserPlus, ArrowLeftRight, X, Search, Check, Sparkles,
+  ChevronDown, Wifi
 } from 'lucide-react';
 import { ICE_SERVERS, getLocalUserMedia, switchCameraStream, getDisplayMediaStream, stopMediaStream } from '../services/webrtc';
 import { socket as globalSocket } from '../services/socket';
+import { 
+  startOutgoingRingbackTone, stopCallAudio, playCallEndedTone, triggerHaptic 
+} from '../services/callAudio';
 
 export default function ActiveCallModal({ 
   callSession, 
@@ -25,6 +29,7 @@ export default function ActiveCallModal({
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isSwappedView, setIsSwappedView] = useState(false); // false: Remote main, Local PiP | true: Local main, Remote PiP
+  const [isMinimized, setIsMinimized] = useState(false); // Floating bubble when browsing app during active call
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [addSearchQuery, setAddSearchQuery] = useState('');
   const [invitedUsers, setInvitedUsers] = useState(new Set());
@@ -173,6 +178,7 @@ export default function ActiveCallModal({
         // 2. Offer / Answer SDP negotiation
         if (session.isInitiator) {
           setCallStatus('Ringing...');
+          startOutgoingRingbackTone();
           const offer = await pc.createOffer({
             offerToReceiveAudio: true,
             offerToReceiveVideo: isVideo ? true : false
@@ -208,6 +214,7 @@ export default function ActiveCallModal({
         }
       } catch (err) {
         console.error('[WebRTC] Call setup error:', err);
+        stopCallAudio();
         if (isMounted) setCallStatus('Error connecting media');
       }
     }
@@ -217,6 +224,7 @@ export default function ActiveCallModal({
     // Socket Event Listeners for Call Signaling
     const handleCallAccepted = async (data) => {
       console.log('[WebRTC] Remote user answered call, applying remote SDP answer');
+      stopCallAudio();
       if (data.signal && pcRef.current) {
         try {
           await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.signal));
@@ -245,6 +253,8 @@ export default function ActiveCallModal({
 
     const handleCallEnded = () => {
       console.log('[WebRTC] Call ended by remote user');
+      stopCallAudio();
+      playCallEndedTone();
       if (isMounted) {
         setCallStatus('Call ended');
         setTimeout(() => onEndCallRef.current?.(), 400);
@@ -253,6 +263,8 @@ export default function ActiveCallModal({
 
     const handleCallRejected = ({ reason }) => {
       console.log('[WebRTC] Call declined by peer');
+      stopCallAudio();
+      playCallEndedTone();
       if (isMounted) {
         setCallStatus(`Declined: ${reason || 'User busy'}`);
         setTimeout(() => onEndCallRef.current?.(), 800);
@@ -261,6 +273,8 @@ export default function ActiveCallModal({
 
     const handleCallFailed = ({ reason }) => {
       console.log('[WebRTC] Call failed');
+      stopCallAudio();
+      playCallEndedTone();
       if (isMounted) {
         setCallStatus(reason || 'User offline');
         setTimeout(() => onEndCallRef.current?.(), 1000);
@@ -494,109 +508,218 @@ export default function ActiveCallModal({
   });
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      zIndex: 140,
-      backgroundColor: isVideo ? '#020617' : 'rgba(235, 244, 255, 0.96)',
-      backdropFilter: 'blur(30px) saturate(180%)',
-      WebkitBackdropFilter: 'blur(30px) saturate(180%)',
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'space-between',
-      overflow: 'hidden'
-    }}>
-      {/* Dedicated audio element for remote stream (Single output = 100% echo & reverb free) */}
-      <audio ref={remoteAudioRef} autoPlay playsInline />
-
-      {/* Toast Feedback Notification */}
-      {toastMessage && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 60,
-          padding: '8px 18px',
-          borderRadius: '20px',
-          backgroundColor: 'rgba(15, 23, 42, 0.88)',
-          color: '#ffffff',
-          fontSize: '12px',
-          fontWeight: '700',
-          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.3)',
-          border: '1px solid rgba(255, 255, 255, 0.2)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          pointerEvents: 'none'
-        }}>
-          <Sparkles size={14} color="#38bdf8" />
-          <span>{toastMessage}</span>
+    <>
+      {/* Floating Minimized Call Pill (Allows multitasking and chatting while in call) */}
+      {isMinimized && (
+        <div 
+          onClick={() => {
+            triggerHaptic(15);
+            setIsMinimized(false);
+          }}
+          className="glass-panel glow-active"
+          style={{
+            position: 'fixed',
+            top: 'max(16px, env(safe-area-inset-top, 16px))',
+            right: '16px',
+            zIndex: 9999,
+            padding: '8px 16px',
+            borderRadius: '26px',
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            color: '#ffffff',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.55)',
+            border: '1px solid rgba(255, 255, 255, 0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            cursor: 'pointer',
+            animation: 'glassModalEnter 0.25s ease'
+          }}
+        >
+          <span style={{
+            width: '9px',
+            height: '9px',
+            borderRadius: '50%',
+            backgroundColor: '#22c55e',
+            boxShadow: '0 0 8px #22c55e'
+          }} />
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <span style={{ fontSize: '13px', fontWeight: '800' }}>{callSession.targetName}</span>
+            <span style={{ fontSize: '10px', color: '#38bdf8' }}>{formatDuration(callDuration)} • Tap to return</span>
+          </div>
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              triggerHaptic(40);
+              playCallEndedTone();
+              stopCallAudio();
+              socket.emit('end-call', { to: callSession.targetId });
+              stopMediaStream(localStreamRef.current);
+              stopMediaStream(remoteStreamRef.current);
+              if (pcRef.current) pcRef.current.close();
+              onEndCall();
+            }}
+            className="glass-btn glass-btn-danger"
+            style={{ width: '32px', height: '32px', borderRadius: '50%', marginLeft: '6px' }}
+            title="End Call"
+          >
+            <PhoneOff size={14} />
+          </button>
         </div>
       )}
 
-      {/* Top Floating Glass Info Bar */}
+      {/* Main Call View Container (hidden when minimized, keeping audio/video streams alive) */}
       <div style={{
-        position: 'absolute',
-        top: 'max(20px, env(safe-area-inset-top, 20px))',
+        position: 'fixed',
+        top: 0,
         left: 0,
         right: 0,
-        display: 'flex',
+        bottom: 0,
+        zIndex: 140,
+        backgroundColor: isVideo ? '#020617' : 'rgba(235, 244, 255, 0.96)',
+        backdropFilter: 'blur(30px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(30px) saturate(180%)',
+        display: isMinimized ? 'none' : 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        gap: '4px',
-        zIndex: 35,
-        pointerEvents: 'none'
+        justifyContent: 'space-between',
+        overflow: 'hidden'
       }}>
-        <div className="glass-pill" style={{
-          padding: '6px 18px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.75)' : 'rgba(255, 255, 255, 0.88)',
-          border: isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)',
-          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
-          pointerEvents: 'auto'
-        }}>
-          <span style={{
-            width: '8px',
-            height: '8px',
-            backgroundColor: callStatus === 'Connected' ? '#22c55e' : '#f59e0b',
-            borderRadius: '50%',
-            boxShadow: callStatus === 'Connected' ? '0 0 8px #22c55e' : 'none'
-          }} />
-          <span style={{ fontSize: '13px', fontWeight: '800', color: isVideo ? '#ffffff' : 'var(--text-primary)' }}>
-            {callStatus === 'Connected' ? formatDuration(callDuration) : callStatus}
-          </span>
-          {isScreenSharing && (
-            <span style={{ fontSize: '11px', color: '#38bdf8', fontWeight: '700', marginLeft: '4px' }}>
-              • 🖥️ Screen
-            </span>
-          )}
-        </div>
+        {/* Dedicated audio element for remote stream (Single output = 100% echo & reverb free) */}
+        <audio ref={remoteAudioRef} autoPlay playsInline />
 
-        <h2 style={{
-          fontSize: '18px',
-          fontWeight: '800',
-          color: isVideo ? '#ffffff' : 'var(--text-primary)',
-          marginTop: '4px',
-          margin: 0,
-          textShadow: isVideo ? '0 2px 8px rgba(0,0,0,0.6)' : 'none'
+        {/* Toast Feedback Notification */}
+        {toastMessage && (
+          <div style={{
+            position: 'absolute',
+            top: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 60,
+            padding: '8px 18px',
+            borderRadius: '20px',
+            backgroundColor: 'rgba(15, 23, 42, 0.88)',
+            color: '#ffffff',
+            fontSize: '12px',
+            fontWeight: '700',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.3)',
+            border: '1px solid rgba(255, 255, 255, 0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            pointerEvents: 'none'
+          }}>
+            <Sparkles size={14} color="#38bdf8" />
+            <span>{toastMessage}</span>
+          </div>
+        )}
+
+        {/* Top Floating Glass Info Bar with Minimize Button & HD Indicator */}
+        <div style={{
+          position: 'absolute',
+          top: 'max(20px, env(safe-area-inset-top, 20px))',
+          left: 0,
+          right: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '4px',
+          zIndex: 35,
+          pointerEvents: 'none'
         }}>
-          {callSession.targetName}
-        </h2>
-        <p style={{
-          fontSize: '11px',
-          color: isVideo ? 'rgba(255, 255, 255, 0.8)' : 'var(--text-secondary)',
-          margin: 0,
-          textShadow: isVideo ? '0 1px 4px rgba(0,0,0,0.6)' : 'none'
-        }}>
-          {isVideo ? 'GlassChat HD Video' : 'GlassChat HD Voice'}
-        </p>
-      </div>
+          {/* Top-Left Minimize Button */}
+          <button 
+            onClick={() => {
+              triggerHaptic(15);
+              setIsMinimized(true);
+            }}
+            className="glass-btn"
+            style={{
+              position: 'absolute',
+              left: '20px',
+              top: '2px',
+              width: '38px',
+              height: '38px',
+              borderRadius: '50%',
+              backgroundColor: isVideo ? 'rgba(255, 255, 255, 0.18)' : 'rgba(0, 0, 0, 0.06)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'auto'
+            }}
+            title="Minimize Call to browse chats"
+          >
+            <ChevronDown size={22} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />
+          </button>
+
+          {/* Top-Right HD Quality Badge */}
+          <div style={{
+            position: 'absolute',
+            right: '20px',
+            top: '4px',
+            display: 'flex',
+            alignItems: 'center',
+            pointerEvents: 'auto'
+          }}>
+            <span className="glass-pill" style={{
+              padding: '4px 10px',
+              fontSize: '11px',
+              fontWeight: '700',
+              color: '#10b981',
+              backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255, 255, 255, 0.9)',
+              border: '1px solid rgba(16, 185, 129, 0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px'
+            }}>
+              <Wifi size={12} /> HD
+            </span>
+          </div>
+
+          <div className="glass-pill" style={{
+            padding: '6px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.75)' : 'rgba(255, 255, 255, 0.88)',
+            border: isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
+            pointerEvents: 'auto'
+          }}>
+            <span style={{
+              width: '8px',
+              height: '8px',
+              backgroundColor: callStatus === 'Connected' ? '#22c55e' : '#f59e0b',
+              borderRadius: '50%',
+              boxShadow: callStatus === 'Connected' ? '0 0 8px #22c55e' : 'none'
+            }} />
+            <span style={{ fontSize: '13px', fontWeight: '800', color: isVideo ? '#ffffff' : 'var(--text-primary)' }}>
+              {callStatus === 'Connected' ? formatDuration(callDuration) : callStatus}
+            </span>
+            {isScreenSharing && (
+              <span style={{ fontSize: '11px', color: '#38bdf8', fontWeight: '700', marginLeft: '4px' }}>
+                • 🖥️ Screen
+              </span>
+            )}
+          </div>
+
+          <h2 style={{
+            fontSize: '18px',
+            fontWeight: '800',
+            color: isVideo ? '#ffffff' : 'var(--text-primary)',
+            marginTop: '4px',
+            margin: 0,
+            textShadow: isVideo ? '0 2px 8px rgba(0,0,0,0.6)' : 'none'
+          }}>
+            {callSession.targetName}
+          </h2>
+          <p style={{
+            fontSize: '11px',
+            color: isVideo ? 'rgba(255, 255, 255, 0.8)' : 'var(--text-secondary)',
+            margin: 0,
+            textShadow: isVideo ? '0 1px 4px rgba(0,0,0,0.6)' : 'none'
+          }}>
+            {isVideo ? 'GlassChat HD Video' : 'GlassChat HD Voice'}
+          </p>
+        </div>
 
       {/* ======================================================= */}
       {/* MAIN VIEW AREA: TRUE EDGE-TO-EDGE FULLSCREEN VIDEO */}
@@ -1164,6 +1287,7 @@ export default function ActiveCallModal({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

@@ -1,12 +1,32 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Phone, PhoneOff, Video } from 'lucide-react';
+import { startIncomingRingtone, stopCallAudio } from '../services/callAudio';
 
 export default function IncomingCallModal({ 
   incomingCall, 
   onAccept, 
   onDecline 
 }) {
+  useEffect(() => {
+    if (incomingCall) {
+      startIncomingRingtone();
+    }
+    return () => {
+      stopCallAudio();
+    };
+  }, [incomingCall]);
+
   if (!incomingCall) return null;
+
+  const handleAcceptCall = () => {
+    stopCallAudio();
+    onAccept();
+  };
+
+  const handleDeclineCall = () => {
+    stopCallAudio();
+    onDecline();
+  };
 
   return (
     <div style={{
@@ -73,7 +93,7 @@ export default function IncomingCallModal({
         {/* Decline */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
           <button 
-            onClick={onDecline}
+            onClick={handleDeclineCall}
             className="glass-btn glass-btn-danger"
             style={{ width: '64px', height: '64px', borderRadius: '50%' }}
           >
@@ -87,7 +107,7 @@ export default function IncomingCallModal({
         {/* Accept */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
           <button 
-            onClick={onAccept}
+            onClick={handleAcceptCall}
             className="glass-btn"
             style={{
               width: '64px',
