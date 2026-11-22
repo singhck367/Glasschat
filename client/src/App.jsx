@@ -18,6 +18,7 @@ import AuthScreen from './components/AuthScreen';
 import AppUpdateModal from './components/AppUpdateModal';
 import { Smartphone, Monitor } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
+import { formatISTTime } from './utils/time';
 
 export const APP_VERSION = '1.2.0';
 export const APP_VERSION_CODE = 120;
@@ -326,6 +327,20 @@ export default function App() {
     const handleIncomingCall = (data) => {
       console.log('Incoming call received:', data);
       setIncomingCall(data);
+      if (data?.from) {
+        setContacts(prev => {
+          if (!prev.some(c => c.id === data.from)) {
+            return [{
+              id: data.from,
+              name: data.fromName || 'User',
+              avatar: data.fromAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+              phone: data.fromPhone || '',
+              online: true
+            }, ...prev];
+          }
+          return prev;
+        });
+      }
     };
 
     // User online status updates
@@ -615,9 +630,67 @@ export default function App() {
       .catch(e => console.error(e));
   };
 
-  const handleEnd1on1Call = () => {
+  const handleEnd1on1Call = (callSummary) => {
     if (active1on1Call) {
       socket.emit('end-call', { to: active1on1Call.targetId });
+
+      const durationSec = callSummary?.duration || 0;
+      const isVideoCall = typeof callSummary?.isVideo === 'boolean' ? callSummary.isVideo : Boolean(active1on1Call.isVideo);
+      const formattedDuration = durationSec > 0 
+        ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`
+        : null;
+
+      const callText = isVideoCall 
+        ? (formattedDuration ? `📹 Video call • ${formattedDuration}` : '📹 Missed video call')
+        : (formattedDuration ? `📞 Voice call • ${formattedDuration}` : '📞 Missed voice call');
+
+      const targetId = active1on1Call.targetId;
+      const chatId = `chat_${[currentUser?.id, targetId].sort().join('_')}`;
+
+      // Insert Call Event Message directly into 1-on-1 Chat Room (WhatsApp style)
+      socket.emit('send-message', {
+        chatId,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        recipientId: targetId,
+        type: 'call_log',
+        text: callText,
+        mediaUrl: null,
+        timestamp: formatISTTime(new Date()),
+        encrypted: true
+      });
+
+      // Also ensure target is in contacts list so chat box is immediately visible
+      setContacts(prev => {
+        if (!prev.some(c => c.id === targetId)) {
+          return [{
+            id: targetId,
+            name: active1on1Call.targetName || 'User',
+            avatar: active1on1Call.targetAvatar,
+            phone: '',
+            online: true
+          }, ...prev];
+        }
+        return prev;
+      });
+
+      // Save to server calls history
+      fetch('/api/calls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callerId: targetId,
+          callerName: active1on1Call.targetName,
+          callerAvatar: active1on1Call.targetAvatar,
+          type: isVideoCall ? 'video' : 'audio',
+          isGroup: false,
+          status: durationSec > 0 ? 'outgoing' : 'missed',
+          duration: formattedDuration || '00:00'
+        })
+      })
+        .then(res => res.json())
+        .then(newCall => setCalls(prev => [newCall, ...prev]))
+        .catch(e => console.error(e));
     }
     setActive1on1Call(null);
   };
@@ -643,6 +716,23 @@ export default function App() {
   const handleDeclineIncomingCall = () => {
     if (!incomingCall) return;
     socket.emit('reject-call', { to: incomingCall.from });
+
+    const targetId = incomingCall.from;
+    const chatId = `chat_${[currentUser?.id, targetId].sort().join('_')}`;
+    const callText = incomingCall.isVideo ? '📹 Missed video call' : '📞 Missed voice call';
+
+    socket.emit('send-message', {
+      chatId,
+      senderId: targetId,
+      senderName: incomingCall.fromName,
+      recipientId: currentUser?.id,
+      type: 'call_log',
+      text: callText,
+      mediaUrl: null,
+      timestamp: formatISTTime(new Date()),
+      encrypted: true
+    });
+
     setIncomingCall(null);
   };
 
@@ -1122,6 +1212,8 @@ export default function App() {
             currentUser={currentUser}
             socket={socket}
             contacts={contacts}
+            savedContacts={savedContacts}
+            savedContactsMap={savedContactsMap}
           />
         )}
 
@@ -1166,6 +1258,7 @@ export default function App() {
               setIsNewChatOpen(false);
             }}
             onStartCall={handleStartCall}
+            savedContacts={savedContacts}
             savedContactsMap={savedContactsMap}
             onSaveContact={handleSaveContact}
             onSyncContacts={handleSyncContacts}

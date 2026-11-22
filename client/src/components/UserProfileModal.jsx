@@ -4,6 +4,7 @@ import {
   Calendar, Mail, Phone as PhoneIcon, User, Info, 
   Lock, Eye, EyeOff, CheckCircle2, UserPlus, Edit3, Check
 } from 'lucide-react';
+import { formatLastSeen } from '../utils/time';
 
 export default function UserProfileModal({ 
   user, 
@@ -73,16 +74,6 @@ export default function UserProfileModal({
       .catch(e => console.error('Failed to fetch user profile:', e))
       .finally(() => setLoading(false));
   }, [user?.id, currentUser?.id]);
-
-  const formatLastSeen = (isoStr) => {
-    if (!isoStr) return 'Offline';
-    try {
-      const d = new Date(isoStr);
-      return `Last seen ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } catch {
-      return 'Offline';
-    }
-  };
 
   return (
     <div style={{

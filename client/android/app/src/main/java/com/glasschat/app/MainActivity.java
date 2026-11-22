@@ -47,6 +47,25 @@ public class MainActivity extends BridgeActivity {
                     if (audioManager != null) {
                         audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                         audioManager.setSpeakerphoneOn(on);
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            List<AudioDeviceInfo> devices = audioManager.getAvailableCommunicationDevices();
+                            if (on) {
+                                for (AudioDeviceInfo device : devices) {
+                                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                                        audioManager.setCommunicationDevice(device);
+                                        break;
+                                    }
+                                }
+                            } else {
+                                for (AudioDeviceInfo device : devices) {
+                                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
+                                        audioManager.setCommunicationDevice(device);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 } catch (Exception e) {
                     e.printStackTrace();
@@ -73,6 +92,16 @@ public class MainActivity extends BridgeActivity {
                                     break;
                                 }
                             }
+
+                            // If no bluetooth, route to Built-in Speaker by default
+                            if (!bluetoothActive) {
+                                for (AudioDeviceInfo device : devices) {
+                                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                                        audioManager.setCommunicationDevice(device);
+                                        break;
+                                    }
+                                }
+                            }
                         } else {
                             if (audioManager.isBluetoothScoAvailableOffCall() || audioManager.isBluetoothA2dpOn()) {
                                 audioManager.startBluetoothSco();
@@ -81,8 +110,6 @@ public class MainActivity extends BridgeActivity {
                             }
                         }
 
-                        // If Bluetooth connected: route to Bluetooth.
-                        // Otherwise: if video or audio call -> loudspeaker by default so audio is clearly audible
                         if (bluetoothActive) {
                             audioManager.setSpeakerphoneOn(false);
                         } else {

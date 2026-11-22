@@ -1,6 +1,7 @@
 import express from 'express';
 import { users, groups, messages, calls, statuses, otpStore, otpLogs, activeCallRooms, saveDatabase } from '../data/store.js';
 import { v4 as uuidv4 } from 'uuid';
+import { formatISTTime, formatISTDateTime } from '../utils/time.js';
 
 const router = express.Router();
 
@@ -39,7 +40,7 @@ router.post('/auth/send-otp', (req, res) => {
     id: `otp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     phone: cleanPhone,
     otp: generatedOtp,
-    createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    createdAt: formatISTDateTime(new Date()),
     timestamp: Date.now(),
     status: 'Active'
   };
@@ -304,7 +305,7 @@ router.post('/messages/broadcast', (req, res) => {
       mediaUrl,
       type,
       encrypted: true,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: formatISTTime(new Date()),
       status: 'delivered',
       isBroadcast: true
     };
@@ -516,9 +517,40 @@ router.delete('/contacts/:contactId', (req, res) => {
 // 🌟 WHATSAPP STATUS / STORIES ROUTES
 // ==========================================
 
-// Get all active statuses with enriched viewer list
+// Helper to check mutual contact saving between two users
+const hasContactSaved = (userA, userB) => {
+  if (!userA || !userB) return false;
+  if (!Array.isArray(userA.savedContacts)) return false;
+  const bDigits = (userB.phone || '').replace(/\D/g, '');
+  const bLast10 = bDigits.slice(-10);
+  if (!bLast10) return false;
+
+  return userA.savedContacts.some(c => {
+    const cDigits = (c.cleanDigits || c.phone || '').replace(/\D/g, '');
+    return cDigits.endsWith(bLast10) || (cDigits && bDigits.endsWith(cDigits));
+  });
+};
+
+// Get all active statuses with enriched viewer list and WhatsApp mutual contacts privacy
 router.get('/status', (req, res) => {
-  const enriched = statuses.map(st => {
+  const viewerId = req.query.userId;
+  const viewerUser = viewerId ? users.find(u => u.id === viewerId) : null;
+
+  // Filter statuses according to WhatsApp contact privacy:
+  // 1. Author always sees their own status.
+  // 2. Viewer sees Author's status IF Viewer has Author saved AND Author has Viewer saved.
+  const visibleStatuses = statuses.filter(st => {
+    if (!viewerUser) return true; // If no viewerId specified, return all (e.g. admin)
+    if (st.userId === viewerId) return true; // Author's own status is always visible
+    const authorUser = users.find(u => u.id === st.userId);
+    if (!authorUser) return false;
+
+    const viewerHasAuthor = hasContactSaved(viewerUser, authorUser);
+    const authorHasViewer = hasContactSaved(authorUser, viewerUser);
+    return viewerHasAuthor && authorHasViewer;
+  });
+
+  const enriched = visibleStatuses.map(st => {
     const user = users.find(u => u.id === st.userId);
     const enrichedViews = (st.views || []).map(v => {
       const viewerId = typeof v === 'string' ? v : v.userId;
@@ -580,7 +612,7 @@ router.post('/status/:id/view', (req, res) => {
     const alreadyViewed = st.views.some(v => (typeof v === 'string' ? v : v.userId) === userId);
     if (!alreadyViewed) {
       const viewer = users.find(u => u.id === userId);
-      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const timeStr = formatISTTime(new Date());
       const viewRecord = {
         userId,
         userName: viewer?.name || 'Contact',
@@ -649,7 +681,7 @@ router.post('/groups', (req, res) => {
       senderId: 'system',
       senderName: 'System',
       text: `Group "${name}" created with End-to-End Encryption 🔒`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: formatISTTime(new Date()),
       status: 'read'
     }
   ];
@@ -708,7 +740,7 @@ router.post('/calls', (req, res) => {
     callerAvatar,
     type: type || 'video',
     isGroup: Boolean(isGroup),
-    timestamp: 'Just now',
+    timestamp: formatISTTime(new Date()),
     status: status || 'outgoing',
     duration: duration || '00:00',
     createdAt: new Date().toISOString()

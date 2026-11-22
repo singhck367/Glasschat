@@ -1,5 +1,6 @@
 import { messages, users, groups, saveDatabase } from '../data/store.js';
 import { v4 as uuidv4 } from 'uuid';
+import { formatISTTime } from '../utils/time.js';
 
 export function setupChatHandlers(io, socket, userSocketMap) {
   // Join a personal or group chat room
@@ -53,7 +54,7 @@ export function setupChatHandlers(io, socket, userSocketMap) {
       mediaUrl,
       type,
       encrypted,
-      timestamp: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: formatISTTime(now),
       createdAt: now.toISOString(),
       rawTime: now.getTime(),
       status: 'delivered'

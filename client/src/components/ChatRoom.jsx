@@ -3,11 +3,13 @@ import {
   ArrowLeft, Phone, Video, Send, Paperclip, 
   Smile, CheckCheck, Check, MoreVertical, Image, Users, Lock, 
   Mic, MicOff, Play, Pause, Trash2, X, Download,
-  FileText, Camera, Headphones, User, BarChart2, Calendar, SmilePlus, Plus
+  FileText, Camera, Headphones, User, BarChart2, Calendar, SmilePlus, Plus,
+  PhoneMissed
 } from 'lucide-react';
 import SecurityVerificationModal from './SecurityVerificationModal';
 import UserProfileModal from './UserProfileModal';
 import { playNotificationSound } from '../services/notifications';
+import { formatISTTime, formatLastSeen } from '../utils/time';
 
 const formatFileSize = (bytes) => {
   if (!bytes) return '0 B';
@@ -297,7 +299,7 @@ export default function ChatRoom({
   // Helper to send message payload
   const emitMessage = (msgData) => {
     const tempId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeStr = formatISTTime();
 
     const optimisticMsg = {
       id: tempId,
@@ -548,7 +550,7 @@ export default function ChatRoom({
 
     const durationStr = `${Math.floor(recordingSeconds / 60)}:${(recordingSeconds % 60).toString().padStart(2, '0')}`;
     const tempId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeStr = formatISTTime();
 
     mediaRecorderRef.current.onstop = () => {
       const recordedMime = mediaRecorderRef.current?.mimeType || 'audio/webm';
@@ -901,7 +903,7 @@ export default function ChatRoom({
                 overflow: 'hidden',
                 textOverflow: 'ellipsis'
               }}>
-                {remoteTypingUser ? `${remoteTypingUser} is typing...` : (chat.online ? 'Online' : (chat.lastSeen ? `Last seen ${chat.lastSeen}` : 'Tap for contact info'))}
+                {remoteTypingUser ? `${remoteTypingUser} is typing...` : (chat.online ? 'Online' : (chat.lastSeen ? formatLastSeen(chat.lastSeen) : 'Tap for contact info'))}
               </span>
             </div>
           </div>
@@ -1323,8 +1325,64 @@ export default function ChatRoom({
                   </div>
                 )}
 
-                {/* 9. STANDARD TEXT (if not audio/poll/event/document) */}
-                {(!['audio', 'poll', 'event', 'document', 'sticker', 'contact', 'image', 'video'].includes(msg.type) || (['image', 'video', 'document'].includes(msg.type) && msg.text && !msg.text.startsWith('📷') && !msg.text.startsWith('📄') && !msg.text.startsWith('🎥'))) && (
+                {/* 9. CALL EVENT MESSAGE (WhatsApp Style) */}
+                {msg.type === 'call_log' && (
+                  <div 
+                    onClick={() => {
+                      const isVid = (msg.text || '').includes('Video') || (msg.text || '').includes('📹');
+                      onStartCall && onStartCall(chat, isVid);
+                    }}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '14px',
+                      backgroundColor: isMe ? 'rgba(2, 132, 199, 0.08)' : 'rgba(0, 0, 0, 0.04)',
+                      minWidth: '200px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '12px',
+                      cursor: 'pointer'
+                    }}
+                    title="Tap to call back"
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <div style={{
+                        width: '36px',
+                        height: '36px',
+                        borderRadius: '50%',
+                        backgroundColor: (msg.text || '').includes('Missed') ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: (msg.text || '').includes('Missed') ? '#ef4444' : '#16a34a',
+                        flexShrink: 0
+                      }}>
+                        {(msg.text || '').includes('Missed') ? (
+                          <PhoneMissed size={18} />
+                        ) : ((msg.text || '').includes('Video') || (msg.text || '').includes('📹')) ? (
+                          <Video size={18} />
+                        ) : (
+                          <Phone size={18} />
+                        )}
+                      </div>
+                      <div>
+                        <div style={{
+                          fontSize: '13px',
+                          fontWeight: '700',
+                          color: (msg.text || '').includes('Missed') ? '#ef4444' : 'var(--text-primary)'
+                        }}>
+                          {msg.text || 'Call'}
+                        </div>
+                        <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                          {(msg.text || '').includes('Missed') ? 'Tap to call back' : (isMe ? 'Outgoing call' : 'Incoming call')}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 10. STANDARD TEXT (if not audio/poll/event/document/call_log) */}
+                {(!['audio', 'poll', 'event', 'document', 'sticker', 'contact', 'image', 'video', 'call_log'].includes(msg.type) || (['image', 'video', 'document'].includes(msg.type) && msg.text && !msg.text.startsWith('📷') && !msg.text.startsWith('📄') && !msg.text.startsWith('🎥'))) && (
                   <p style={{
                     fontSize: '14px',
                     lineHeight: '1.45',
@@ -1347,7 +1405,7 @@ export default function ChatRoom({
                   padding: msg.type === 'image' ? '0 6px 2px 0' : '0'
                 }}>
                   <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                    {msg.timestamp || 'Now'}
+                    {(msg.rawTime || msg.createdAt) ? formatISTTime(msg.rawTime || msg.createdAt) : (msg.timestamp || 'Now')}
                   </span>
                   {isMe && (
                     <span style={{ display: 'flex', alignItems: 'center' }}>

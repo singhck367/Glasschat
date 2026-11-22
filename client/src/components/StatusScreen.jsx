@@ -3,6 +3,7 @@ import {
   Camera, Plus, Eye, X, Image as ImageIcon, Type, Send, ChevronRight, 
   Trash2, Clock, Check, Sparkles, ChevronUp, CheckCheck
 } from 'lucide-react';
+import { formatChatTimestamp, formatISTTime } from '../utils/time';
 
 export default function StatusScreen({ currentUser, socket }) {
   const [statuses, setStatuses] = useState([]);
@@ -36,9 +37,10 @@ export default function StatusScreen({ currentUser, socket }) {
     'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)'
   ];
 
-  // Fetch all statuses
+  // Fetch statuses with WhatsApp mutual contact privacy
   const loadStatuses = () => {
-    fetch('/api/status')
+    const url = currentUser?.id ? `/api/status?userId=${currentUser.id}` : '/api/status';
+    fetch(url)
       .then(r => r.json())
       .then(data => setStatuses(data || []))
       .catch(e => console.error('Failed to load statuses:', e));
@@ -47,8 +49,8 @@ export default function StatusScreen({ currentUser, socket }) {
   useEffect(() => {
     loadStatuses();
 
-    const handleNewStatus = (newSt) => {
-      setStatuses(prev => [newSt, ...prev.filter(s => s.id !== newSt.id)]);
+    const handleNewStatus = () => {
+      loadStatuses();
     };
     const handleDeleteStatus = ({ id }) => {
       setStatuses(prev => prev.filter(s => s.id !== id));
@@ -435,7 +437,7 @@ export default function StatusScreen({ currentUser, socket }) {
                         {group.userName}
                       </h4>
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        {latestStory.timestamp || 'Today'}
+                        {formatChatTimestamp(latestStory.createdAt || latestStory.timestamp)}
                       </span>
                     </div>
                     <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '2px 0 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -661,7 +663,7 @@ export default function StatusScreen({ currentUser, socket }) {
                   {activeStoryGroup[activeStoryIndex]?.userName}
                 </h4>
                 <span style={{ fontSize: '11px', opacity: 0.75 }}>
-                  {activeStoryGroup[activeStoryIndex]?.timestamp || 'Recent'}
+                  {formatChatTimestamp(activeStoryGroup[activeStoryIndex]?.createdAt || activeStoryGroup[activeStoryIndex]?.timestamp || 'Recent')}
                 </span>
               </div>
             </div>
@@ -937,7 +939,7 @@ export default function StatusScreen({ currentUser, socket }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
                         <Clock size={12} />
-                        <span>{viewer.timestamp || 'Recently'}</span>
+                        <span>{viewer.viewedAt ? `Today at ${formatISTTime(viewer.viewedAt)}` : (viewer.timestamp || 'Recently')}</span>
                       </div>
                       <CheckCheck size={15} color="#0284c7" />
                     </div>

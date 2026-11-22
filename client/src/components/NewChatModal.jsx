@@ -9,6 +9,7 @@ export default function NewChatModal({
   onStartCall,
   currentUserId,
   chatSummaries = {},
+  savedContacts = [],
   savedContactsMap = {},
   onSaveContact,
   onSyncContacts
@@ -16,6 +17,10 @@ export default function NewChatModal({
   const [search, setSearch] = useState('');
   const [inspectUser, setInspectUser] = useState(null);
   const [syncStatus, setSyncStatus] = useState('');
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addPhone, setAddPhone] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef(null);
 
   const cleanSearch = search.trim().toLowerCase();
@@ -29,6 +34,40 @@ export default function NewChatModal({
     const last10 = uDigits.slice(-10);
     const savedName = savedContactsMap[last10] || savedContactsMap[uDigits];
     return savedName || userObj.name || uPhone || 'User';
+  };
+
+  // Add / Save new contact manually
+  const handleAddNewContact = async (e) => {
+    e.preventDefault();
+    if (!addName.trim() || !addPhone.trim()) return;
+    setIsSaving(true);
+    try {
+      if (onSaveContact) {
+        await onSaveContact(addPhone.trim(), addName.trim());
+        setSyncStatus(`✅ Saved contact "${addName.trim()}"!`);
+        setTimeout(() => setSyncStatus(''), 3500);
+      }
+
+      const cleanNewDigits = addPhone.replace(/\D/g, '');
+      const last10 = cleanNewDigits.slice(-10);
+      const matched = contacts.find(c => {
+        const cDigits = (c.phone || '').replace(/\D/g, '');
+        return (last10 && cDigits.endsWith(last10)) || cDigits === cleanNewDigits;
+      });
+
+      setShowAddContact(false);
+      setAddName('');
+      setAddPhone('');
+
+      if (matched) {
+        onSelectContact(matched);
+        onClose();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Sync Phone Contacts using modern Web Contact Picker API (Chrome on Android)
@@ -104,6 +143,14 @@ export default function NewChatModal({
     if (c.id === currentUserId) return false;
     const cChatId = `chat_${[currentUserId, c.id].sort().join('_')}`;
     return Boolean(chatSummaries[cChatId]?.lastMessage);
+  });
+
+  // Filter registered users who are in user's saved contacts
+  const savedRegisteredContacts = contacts.filter(c => {
+    if (c.id === currentUserId) return false;
+    const cDigits = (c.phone || '').replace(/\D/g, '');
+    const last10 = cDigits.slice(-10);
+    return Boolean(savedContactsMap[last10] || savedContactsMap[cDigits]);
   });
 
   // When searching: search across all registered users (excluding current user)
@@ -194,7 +241,7 @@ export default function NewChatModal({
           )}
         </div>
 
-        {/* 📲 Sync Phone Contacts Quick Action */}
+        {/* 📲 Quick Actions: Add New Contact & Sync Device Contacts */}
         <input 
           type="file" 
           ref={fileInputRef} 
@@ -202,7 +249,25 @@ export default function NewChatModal({
           onChange={handleVcfUpload} 
           style={{ display: 'none' }} 
         />
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '0 2px' }}>
+          <button
+            onClick={() => setShowAddContact(!showAddContact)}
+            className="glass-btn glass-btn-primary"
+            style={{
+              flex: 1,
+              height: '34px',
+              fontSize: '12px',
+              fontWeight: '700',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px'
+            }}
+            title="Save a new contact name and phone number"
+          >
+            <UserPlus size={14} /> New Contact
+          </button>
+
           <button
             onClick={handleSyncNativeContacts}
             className="glass-btn"
@@ -221,9 +286,70 @@ export default function NewChatModal({
             }}
             title="Import/Sync contacts from your mobile address book to server"
           >
-            <Smartphone size={14} /> Sync Device Contacts
+            <Smartphone size={14} /> Sync Device
           </button>
         </div>
+
+        {/* Inline Add New Contact Form */}
+        {showAddContact && (
+          <form 
+            onSubmit={handleAddNewContact}
+            className="glass-panel" 
+            style={{
+              padding: '12px 14px',
+              borderRadius: '16px',
+              backgroundColor: 'rgba(255, 255, 255, 0.95)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              border: '1.5px solid rgba(2, 132, 199, 0.35)',
+              animation: 'glassModalEnter 0.2s ease'
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '12px', fontWeight: '800', color: '#0369a1' }}>
+                Add New Contact
+              </span>
+              <button 
+                type="button" 
+                onClick={() => setShowAddContact(false)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)' }}
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <input 
+              type="text"
+              placeholder="Contact Full Name (e.g. Rahul Sharma)"
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              className="glass-input"
+              style={{ fontSize: '12px', padding: '6px 10px', width: '100%' }}
+              required
+            />
+
+            <input 
+              type="tel"
+              placeholder="Mobile Number (e.g. 9162152221)"
+              value={addPhone}
+              onChange={(e) => setAddPhone(e.target.value)}
+              className="glass-input"
+              style={{ fontSize: '12px', padding: '6px 10px', width: '100%' }}
+              required
+            />
+
+            <button
+              type="submit"
+              disabled={isSaving || !addName.trim() || !addPhone.trim()}
+              className="glass-btn glass-btn-primary"
+              style={{ height: '32px', fontSize: '12px', fontWeight: '700', marginTop: '2px' }}
+            >
+              {isSaving ? 'Saving...' : 'Save & Connect'}
+            </button>
+          </form>
+        )}
+
         {syncStatus && (
           <div style={{ fontSize: '11px', color: '#16a34a', fontWeight: '700', textAlign: 'center', padding: '2px 0' }}>
             {syncStatus}
@@ -394,6 +520,108 @@ export default function NewChatModal({
                   To protect user privacy, new profiles are not shown publicly. Type a contact's <strong>Name</strong> or <strong>Mobile Number</strong> in the search bar above to connect.
                 </p>
               </div>
+
+              {/* Saved Contacts on GlassChat */}
+              {savedRegisteredContacts.length > 0 && (
+                <div>
+                  <div style={{ padding: '0 4px', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.5px', color: '#0369a1' }}>
+                      Contacts on GlassChat ({savedRegisteredContacts.length})
+                    </span>
+                  </div>
+
+                  {savedRegisteredContacts.map(contact => (
+                    <div 
+                      key={contact.id}
+                      onClick={() => {
+                        onSelectContact(contact);
+                        onClose();
+                      }}
+                      className="glass-card"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '10px 14px',
+                        cursor: 'pointer',
+                        gap: '12px',
+                        marginBottom: '8px'
+                      }}
+                    >
+                      <div 
+                        style={{ position: 'relative' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setInspectUser(contact);
+                        }}
+                        title="View Profile"
+                      >
+                        <img 
+                          src={contact.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'} 
+                          alt={contact.name}
+                          style={{ width: '42px', height: '42px', borderRadius: '50%', objectFit: 'cover', border: '2px solid rgba(255, 255, 255, 0.9)' }}
+                        />
+                        {contact.online && (
+                          <span style={{
+                            position: 'absolute',
+                            bottom: '1px',
+                            right: '1px',
+                            width: '9px',
+                            height: '9px',
+                            backgroundColor: '#22c55e',
+                            border: '2px solid #ffffff',
+                            borderRadius: '50%'
+                          }} />
+                        )}
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h4 style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>
+                          {getDisplayName(contact)}
+                        </h4>
+                        <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '1px 0' }}>
+                          {contact.phone}
+                        </p>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '6px' }} onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onStartCall(contact, false);
+                          }}
+                          className="glass-btn"
+                          style={{ width: '30px', height: '30px' }}
+                          title="Audio Call"
+                        >
+                          <Phone size={13} color="#0284c7" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onStartCall(contact, true);
+                          }}
+                          className="glass-btn"
+                          style={{ width: '30px', height: '30px' }}
+                          title="Video Call"
+                        >
+                          <Video size={13} color="#0284c7" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            onSelectContact(contact);
+                            onClose();
+                          }}
+                          className="glass-btn"
+                          style={{ width: '30px', height: '30px', backgroundColor: 'rgba(2, 132, 199, 0.1)', borderColor: '#0284c7' }}
+                          title="Chat"
+                        >
+                          <MessageSquare size={13} color="#0284c7" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Recent Active Conversations (if any) */}
               {recentContacts.length > 0 && (

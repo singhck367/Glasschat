@@ -1,5 +1,6 @@
 import React from 'react';
 import { Phone, Video, PhoneIncoming, PhoneOutgoing, PhoneMissed, Users } from 'lucide-react';
+import { formatChatTimestamp } from '../utils/time';
 
 export default function CallsList({ 
   calls, 
@@ -99,7 +100,7 @@ export default function CallsList({
                   <PhoneOutgoing size={13} color="#0284c7" />
                 )}
                 <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  {call.timestamp} • {call.duration || (isVideo ? 'Video' : 'Audio')}
+                  {formatChatTimestamp(call.createdAt || call.timestamp)} • {call.duration || (isVideo ? 'Video' : 'Audio')}
                 </span>
               </div>
             </div>

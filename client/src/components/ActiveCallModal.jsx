@@ -15,7 +15,9 @@ export default function ActiveCallModal({
   onEndCall, 
   currentUser,
   socket = globalSocket,
-  contacts = []
+  contacts = [],
+  savedContacts = [],
+  savedContactsMap = {}
 }) {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(Boolean(callSession.isVideo));
@@ -42,6 +44,8 @@ export default function ActiveCallModal({
   const remoteStreamRef = useRef(null);
   const pcRef = useRef(null);
   const cameraVideoTrackRef = useRef(null);
+  const callDurationRef = useRef(0);
+  const audioContextRef = useRef(null);
 
   const sessionRef = useRef(callSession);
   const currentUserRef = useRef(currentUser);
@@ -115,13 +119,36 @@ export default function ActiveCallModal({
         remoteVideoRef.current.play().catch(e => console.log('Remote video autoplay notice:', e));
       }
 
-      // 2. Dedicated Audio element stream binding (Single source = zero echo/reverb)
+      // 2. Dedicated Audio stream binding using hidden video element (Guaranteed audio playback on mobile)
       if (remoteAudioRef.current) {
         if (remoteAudioRef.current.srcObject !== stream) {
           remoteAudioRef.current.srcObject = stream;
         }
+        remoteAudioRef.current.muted = false;
         remoteAudioRef.current.volume = 1.0;
         remoteAudioRef.current.play().catch(e => console.log('Remote audio autoplay notice:', e));
+      }
+
+      // 3. Web Audio API secondary audio pipe (zero silent audio on Android/iOS)
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+            audioContextRef.current = new AudioCtx();
+          }
+          if (audioContextRef.current.state === 'suspended') {
+            audioContextRef.current.resume().catch(() => {});
+          }
+          const audioTracks = stream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            const audioStreamOnly = new MediaStream(audioTracks);
+            const source = audioContextRef.current.createMediaStreamSource(audioStreamOnly);
+            source.connect(audioContextRef.current.destination);
+            console.log('[WebRTC] Connected audio stream to Web Audio destination pipe');
+          }
+        }
+      } catch (e) {
+        console.warn('Web Audio pipe notice:', e);
       }
 
       if (isMounted) {
@@ -257,7 +284,11 @@ export default function ActiveCallModal({
       playCallEndedTone();
       if (isMounted) {
         setCallStatus('Call ended');
-        setTimeout(() => onEndCallRef.current?.(), 400);
+        setTimeout(() => onEndCallRef.current?.({
+          duration: callDurationRef.current,
+          status: callDurationRef.current > 0 ? 'completed' : 'missed',
+          isVideo
+        }), 400);
       }
     };
 
@@ -267,7 +298,11 @@ export default function ActiveCallModal({
       playCallEndedTone();
       if (isMounted) {
         setCallStatus(`Declined: ${reason || 'User busy'}`);
-        setTimeout(() => onEndCallRef.current?.(), 800);
+        setTimeout(() => onEndCallRef.current?.({
+          duration: 0,
+          status: 'declined',
+          isVideo
+        }), 800);
       }
     };
 
@@ -277,7 +312,11 @@ export default function ActiveCallModal({
       playCallEndedTone();
       if (isMounted) {
         setCallStatus(reason || 'User offline');
-        setTimeout(() => onEndCallRef.current?.(), 1000);
+        setTimeout(() => onEndCallRef.current?.({
+          duration: 0,
+          status: 'failed',
+          isVideo
+        }), 1000);
       }
     };
 
@@ -301,6 +340,11 @@ export default function ActiveCallModal({
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
 
+      if (audioContextRef.current) {
+        try { audioContextRef.current.close(); } catch (e) {}
+        audioContextRef.current = null;
+      }
+
       if (pcRef.current) {
         try { pcRef.current.close(); } catch (e) {}
       }
@@ -317,7 +361,11 @@ export default function ActiveCallModal({
     let interval = null;
     if (callStatus === 'Connected') {
       interval = setInterval(() => {
-        setCallDuration(prev => prev + 1);
+        setCallDuration(prev => {
+          const next = prev + 1;
+          callDurationRef.current = next;
+          return next;
+        });
       }, 1000);
     }
     return () => clearInterval(interval);
@@ -518,12 +566,29 @@ export default function ActiveCallModal({
     showToast(`📞 Invitation sent to ${contact.name}!`);
   };
 
-  // Filter contacts for in-call invitation
+  // Filter contacts for in-call invitation: ONLY show registered users who are saved in user's contacts
   const filteredContacts = contacts.filter(c => {
     if (c.id === currentUser?.id || c.id === callSession.targetId) return false;
+    const cPhoneDigits = (c.phone || '').replace(/\D/g, '');
+    const last10 = cPhoneDigits.slice(-10);
+
+    const isSaved = (savedContactsMap && (savedContactsMap[last10] || savedContactsMap[cPhoneDigits])) ||
+      (Array.isArray(savedContacts) && savedContacts.some(sc => {
+        const scDigits = (sc.cleanDigits || sc.phone || '').replace(/\D/g, '');
+        return (last10 && scDigits.endsWith(last10)) || scDigits === cPhoneDigits;
+      }));
+
+    if (!isSaved) return false;
+
+    const savedName = (savedContactsMap && (savedContactsMap[last10] || savedContactsMap[cPhoneDigits])) || c.name || '';
     if (!addSearchQuery) return true;
     const q = addSearchQuery.toLowerCase();
-    return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
+    return savedName.toLowerCase().includes(q) || (c.phone || '').includes(q);
+  }).map(c => {
+    const cPhoneDigits = (c.phone || '').replace(/\D/g, '');
+    const last10 = cPhoneDigits.slice(-10);
+    const resolvedName = (savedContactsMap && (savedContactsMap[last10] || savedContactsMap[cPhoneDigits])) || c.name || c.phone || 'User';
+    return { ...c, displayName: resolvedName };
   });
 
   return (
@@ -575,7 +640,11 @@ export default function ActiveCallModal({
               stopMediaStream(localStreamRef.current);
               stopMediaStream(remoteStreamRef.current);
               if (pcRef.current) pcRef.current.close();
-              onEndCall();
+              onEndCall({
+                duration: callDurationRef.current,
+                status: callDurationRef.current > 0 ? 'completed' : 'missed',
+                isVideo
+              });
             }}
             className="glass-btn glass-btn-danger"
             style={{ width: '32px', height: '32px', borderRadius: '50%', marginLeft: '6px' }}
@@ -602,8 +671,15 @@ export default function ActiveCallModal({
         justifyContent: 'space-between',
         overflow: 'hidden'
       }}>
-        {/* Dedicated audio element for remote stream (Single output = 100% echo & reverb free) */}
-        <audio ref={remoteAudioRef} autoPlay playsInline />
+        {/* Dedicated WebRTC audio playback element (Hidden video element guarantees priority VoIP audio pipeline on Android & iOS WebViews) */}
+        <video 
+          ref={remoteAudioRef} 
+          autoPlay 
+          playsInline 
+          webkit-playsinline="true"
+          muted={false} 
+          style={{ position: 'fixed', top: -9999, left: -9999, width: '1px', height: '1px', opacity: 0, pointerEvents: 'none' }} 
+        />
 
         {/* Toast Feedback Notification */}
         {toastMessage && (
@@ -1137,7 +1213,11 @@ export default function ActiveCallModal({
                 stopMediaStream(localStreamRef.current);
                 stopMediaStream(remoteStreamRef.current);
                 if (pcRef.current) pcRef.current.close();
-                onEndCall();
+                onEndCall({
+                  duration: callDurationRef.current,
+                  status: callDurationRef.current > 0 ? 'completed' : 'missed',
+                  isVideo
+                });
               }}
               className="glass-btn"
               style={{
@@ -1268,7 +1348,7 @@ export default function ActiveCallModal({
 
                         <div>
                           <h4 style={{ fontSize: '14px', fontWeight: '700', margin: 0, color: 'var(--text-primary)' }}>
-                            {contact.name}
+                            {contact.displayName || contact.name}
                           </h4>
                           <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '2px 0 0 0' }}>
                             {contact.phone || (contact.online ? 'Online' : 'Offline')}

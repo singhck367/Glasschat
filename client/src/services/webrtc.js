@@ -19,44 +19,50 @@ export const ICE_SERVERS = {
 
 // Get local audio and/or video stream from device camera & microphone
 export async function getLocalUserMedia(video = true, audio = true, facingMode = 'user') {
-  // Attempt 1: Standard constraints
+  // Clean standard constraints: compatible with Android HAL, iOS WebKit, and Desktop Chrome
+  // Avoid deprecated non-standard goog* flags which cause dual-AEC conflicts and audio mute on mobile
+  const constraints = {
+    audio: audio ? {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    } : false,
+    video: video ? {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      facingMode: { ideal: facingMode }
+    } : false
+  };
+
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: video ? {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: facingMode
-      } : false,
-      audio: audio ? {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        googEchoCancellation: true,
-        googAutoGainControl: true,
-        googNoiseSuppression: true,
-        googHighpassFilter: true,
-        channelCount: 1
-      } : false
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    // Explicitly verify and enable audio tracks
+    if (audio) {
+      stream.getAudioTracks().forEach(t => {
+        t.enabled = true;
+      });
+    }
     return stream;
   } catch (err) {
-    console.warn('[WebRTC] Standard media access failed, trying simplified media constraints:', err);
-    // Attempt 2: Simplified constraints without advanced audio flags (fixes Android OverconstrainedError)
+    console.warn('[WebRTC] Primary getUserMedia failed, trying relaxed constraints:', err);
     try {
-      const simpleStream = await navigator.mediaDevices.getUserMedia({
+      const relaxedStream = await navigator.mediaDevices.getUserMedia({
         video: video ? { facingMode } : false,
         audio: audio ? true : false
       });
-      return simpleStream;
+      if (audio) {
+        relaxedStream.getAudioTracks().forEach(t => { t.enabled = true; });
+      }
+      return relaxedStream;
     } catch (err2) {
-      console.warn('[WebRTC] Simple constraints failed, attempting pure audio fallback:', err2);
-      // Attempt 3: Pure audio if audio was requested
+      console.warn('[WebRTC] Relaxed constraints failed, attempting pure audio fallback:', err2);
       if (audio) {
         try {
           const pureAudioStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
             video: false
           });
+          pureAudioStream.getAudioTracks().forEach(t => { t.enabled = true; });
           return pureAudioStream;
         } catch (audioErr) {
           console.error('[WebRTC] Microphone access denied or unavailable:', audioErr);

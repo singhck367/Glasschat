@@ -1,5 +1,6 @@
 import React from 'react';
 import { Phone, Video, CheckCheck, Check, Users } from 'lucide-react';
+import { formatChatTimestamp } from '../utils/time';
 
 export default function ChatListItem({ 
   chat, 
@@ -10,7 +11,7 @@ export default function ChatListItem({
 }) {
   const isGroup = Boolean(chat.isGroup);
   const lastMessage = chat.lastMessage || 'Tap to start conversation';
-  const timestamp = chat.timestamp || 'Today';
+  const timestamp = formatChatTimestamp(chat.rawTime || chat.createdAt || chat.timestamp);
   const isOnline = Boolean(chat.online);
 
   const cleanPhoneDigits = (chat.phone || '').replace(/\D/g, '');
