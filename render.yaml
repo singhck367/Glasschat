@@ -3,9 +3,8 @@ services:
     name: glasschat-backend
     env: node
     plan: free
-    rootDir: server
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: cd server && npm install
+    startCommand: node server/src/index.js
     envVars:
       - key: NODE_ENV
         value: production

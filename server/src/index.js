@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -84,7 +85,10 @@ app.use((req, res, next) => {
 // Download APK route for easy mobile installation
 app.get('/download-apk', (req, res) => {
   const apkPath = path.resolve(__dirname, '../../GlassChat.apk');
-  res.download(apkPath, 'GlassChat.apk');
+  if (fs.existsSync(apkPath)) {
+    return res.download(apkPath, 'GlassChat.apk');
+  }
+  res.status(404).send('APK file not hosted directly on this instance.');
 });
 
 // API Routes
@@ -100,16 +104,27 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Serve static client build (Vite dist) for web users accessing via cloud tunnel or browser
+// Serve static client build (Vite dist) if available
 const clientDistPath = path.resolve(__dirname, '../../client/dist');
-app.use(express.static(clientDistPath));
-
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/health' || req.path.startsWith('/socket.io')) {
-    return next();
-  }
-  res.sendFile(path.join(clientDistPath, 'index.html'));
-});
+const indexPath = path.join(clientDistPath, 'index.html');
+if (fs.existsSync(indexPath)) {
+  app.use(express.static(clientDistPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/health' || req.path.startsWith('/socket.io')) {
+      return next();
+    }
+    res.sendFile(indexPath);
+  });
+} else {
+  app.get('/', (req, res) => {
+    res.json({
+      status: 'online',
+      appName: 'GlassChat Server',
+      message: 'GlassChat 24/7 Cloud Backend is running successfully! 🚀',
+      timestamp: new Date().toISOString()
+    });
+  });
+}
 
 // Map of userId -> socketId
 const userSocketMap = new Map();

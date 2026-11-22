@@ -1,0 +1,19 @@
+{
+  "name": "glasschat-cloud-app",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server/src/index.js",
+  "scripts": {
+    "build": "cd server && npm install",
+    "start": "node server/src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.7.5",
+    "helmet": "^8.3.0",
+    "socket.io": "^4.7.5",
+    "uuid": "^9.0.1"
+  }
+}
