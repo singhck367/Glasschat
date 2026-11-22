@@ -1,0 +1,16 @@
+{
+  "appId": "com.glasschat.app",
+  "appName": "GlassChat",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "ios": {
+    "scheme": "GlassChat"
+  }
+}
+

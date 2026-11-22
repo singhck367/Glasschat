@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Builds
+dist/
+client/dist/
+client/android/app/build/
+client/android/.gradle/
+.gradle/
+*.apk
+GlassChat.apk
+
+# Large binaries & tools
+cloudflared.exe
+bin/
+
+# Secrets & Environment
+.env
+server/.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
