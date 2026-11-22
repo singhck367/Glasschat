@@ -148,6 +148,23 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onBackPressed() {
+        try {
+            WebView webView = getBridge().getWebView();
+            if (webView != null) {
+                webView.evaluateJavascript(
+                    "if (window.__handleAndroidBack) { const handled = window.__handleAndroidBack(); if (!handled && window.Capacitor) { window.Capacitor.Plugins.App?.exitApp(); } } else { window.history.back(); }",
+                    null
+                );
+                return;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        super.onBackPressed();
+    }
+
+    @Override
     public void onDestroy() {
         super.onDestroy();
         try {

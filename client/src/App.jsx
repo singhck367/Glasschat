@@ -17,6 +17,7 @@ import StatusScreen from './components/StatusScreen';
 import AuthScreen from './components/AuthScreen';
 import AppUpdateModal from './components/AppUpdateModal';
 import { Smartphone, Monitor } from 'lucide-react';
+import { App as CapacitorApp } from '@capacitor/app';
 
 const APP_VERSION = '1.0.0';
 
@@ -35,10 +36,6 @@ export default function App() {
   const selectedChatRef = useRef(selectedChat);
   const [searchQuery, setSearchQuery] = useState('');
 
-  useEffect(() => {
-    selectedChatRef.current = selectedChat;
-  }, [selectedChat]);
-  
   // Call States
   const [active1on1Call, setActive1on1Call] = useState(null);
   const [activeGroupCall, setActiveGroupCall] = useState(null);
@@ -49,6 +46,134 @@ export default function App() {
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(window.location.hash === '#admin');
   const [updateInfo, setUpdateInfo] = useState(null);
+
+  // Navigation & Back-Button Safety Refs
+  const activeTabRef = useRef(activeTab);
+  const isNewChatOpenRef = useRef(isNewChatOpen);
+  const isCreateGroupOpenRef = useRef(isCreateGroupOpen);
+  const isAdminOpenRef = useRef(isAdminOpen);
+  const updateInfoRef = useRef(updateInfo);
+  const active1on1CallRef = useRef(active1on1Call);
+  const activeGroupCallRef = useRef(activeGroupCall);
+  const lastBackPressTimeRef = useRef(0);
+  const [exitToast, setExitToast] = useState(false);
+
+  useEffect(() => {
+    selectedChatRef.current = selectedChat;
+    if (selectedChat) {
+      window.history.pushState({ screen: 'chat' }, '');
+    }
+  }, [selectedChat]);
+
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { isNewChatOpenRef.current = isNewChatOpen; }, [isNewChatOpen]);
+  useEffect(() => { isCreateGroupOpenRef.current = isCreateGroupOpen; }, [isCreateGroupOpen]);
+  useEffect(() => { isAdminOpenRef.current = isAdminOpen; }, [isAdminOpen]);
+  useEffect(() => { updateInfoRef.current = updateInfo; }, [updateInfo]);
+  useEffect(() => { active1on1CallRef.current = active1on1Call; }, [active1on1Call]);
+  useEffect(() => { activeGroupCallRef.current = activeGroupCall; }, [activeGroupCall]);
+
+  // Core Mobile Hardware & Gesture Back Button Handler
+  const handleBackAction = () => {
+    // 1. If active 1-on-1 or group call is ongoing, do NOT close app
+    if (active1on1CallRef.current || activeGroupCallRef.current) {
+      return true; // Keep call alive
+    }
+
+    // 2. If update modal is open, close it
+    if (updateInfoRef.current) {
+      setUpdateInfo(null);
+      return true;
+    }
+
+    // 3. If new chat modal is open, close it
+    if (isNewChatOpenRef.current) {
+      setIsNewChatOpen(false);
+      return true;
+    }
+
+    // 4. If create group modal is open, close it
+    if (isCreateGroupOpenRef.current) {
+      setIsCreateGroupOpen(false);
+      return true;
+    }
+
+    // 5. If admin portal is open, close it
+    if (isAdminOpenRef.current) {
+      setIsAdminOpen(false);
+      window.location.hash = '';
+      return true;
+    }
+
+    // 6. Check inner modals in SettingsScreen
+    if (window.__handleSettingsInnerBack && window.__handleSettingsInnerBack()) {
+      return true;
+    }
+
+    // 7. Check inner popups in ChatRoom (Image preview, attachments, emojis, etc.)
+    if (window.__handleChatInnerBack && window.__handleChatInnerBack()) {
+      return true;
+    }
+
+    // 8. CRITICAL: If inside a Chat Room, close chat and return to Chat List!
+    if (selectedChatRef.current) {
+      setSelectedChat(null);
+      return true; // Successfully navigated back to chats list
+    }
+
+    // 9. If on another tab (Status, Calls, Settings), switch back to 'chats' tab
+    if (activeTabRef.current !== 'chats') {
+      setActiveTab('chats');
+      return true;
+    }
+
+    // 10. Already on main chats list: Double-tap back to exit
+    const now = Date.now();
+    if (now - lastBackPressTimeRef.current < 2000) {
+      return false; // Exit app
+    } else {
+      lastBackPressTimeRef.current = now;
+      setExitToast(true);
+      setTimeout(() => setExitToast(false), 2000);
+      return true; // Handled toast, prevent accidental exit
+    }
+  };
+
+  // Mobile Android Hardware Back Button + Browser PopState Interceptor
+  useEffect(() => {
+    window.__handleAndroidBack = handleBackAction;
+
+    // 1. Capacitor Native Back Button Listener (for APK)
+    let backListener = null;
+    try {
+      backListener = CapacitorApp.addListener('backButton', () => {
+        const handled = handleBackAction();
+        if (!handled) {
+          CapacitorApp.exitApp();
+        }
+      });
+    } catch (e) {
+      console.warn('Capacitor backButton init notice:', e);
+    }
+
+    // 2. HTML5 History PopState Listener (for Mobile Browser & PWA)
+    window.history.pushState(null, '');
+    const handlePopState = () => {
+      const handled = handleBackAction();
+      if (handled) {
+        window.history.pushState(null, '');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.__handleAndroidBack = null;
+      if (backListener && backListener.remove) {
+        backListener.remove();
+      }
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
 
   // Check for app updates against backend /api/app-version
   const checkForAppUpdates = async (manual = false) => {
@@ -1040,6 +1165,33 @@ export default function App() {
               setUpdateInfo(null);
             }}
           />
+        )}
+
+        {/* Double-Tap Back To Exit Glass Toast Alert */}
+        {exitToast && (
+          <div style={{
+            position: 'fixed',
+            bottom: '76px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 9999,
+            padding: '9px 22px',
+            borderRadius: '26px',
+            backgroundColor: 'rgba(15, 23, 42, 0.92)',
+            color: '#ffffff',
+            fontSize: '13px',
+            fontWeight: '700',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)',
+            border: '1px solid rgba(255, 255, 255, 0.25)',
+            backdropFilter: 'blur(16px)',
+            pointerEvents: 'none',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            animation: 'glassModalEnter 0.2s ease'
+          }}>
+            <span>Press back again to exit GlassChat</span>
+          </div>
         )}
       </main>
     </div>

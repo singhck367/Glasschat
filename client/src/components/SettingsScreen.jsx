@@ -20,6 +20,20 @@ export default function SettingsScreen({
   // Modal states
   const [activeModal, setActiveModal] = useState(null); // 'profile' | 'broadcast' | 'account' | 'privacy' | 'chats' | 'appearance' | 'storage'
   
+  // Mobile Back Button Support: Close sub-settings modals before navigating away
+  React.useEffect(() => {
+    window.__handleSettingsInnerBack = () => {
+      if (activeModal) {
+        setActiveModal(null);
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      window.__handleSettingsInnerBack = null;
+    };
+  }, [activeModal]);
+  
   // Advanced Two-Step Verification (2FA) State
   const [twoStepEnabled, setTwoStepEnabled] = useState(Boolean(currentUser?.twoStepEnabled));
   const [twoStepPin, setTwoStepPin] = useState(currentUser?.twoStepPin || '');

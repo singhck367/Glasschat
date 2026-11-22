@@ -73,6 +73,61 @@ export default function ChatRoom({
   // Audio Voice Note Recording State
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+
+  // Mobile Back Button Support: Close inner popups (preview, attachments, etc.) before closing chat
+  useEffect(() => {
+    window.__handleChatInnerBack = () => {
+      if (previewImage) {
+        setPreviewImage(null);
+        return true;
+      }
+      if (showEmojiPicker) {
+        setShowEmojiPicker(false);
+        return true;
+      }
+      if (showAttachmentMenu) {
+        setShowAttachmentMenu(false);
+        return true;
+      }
+      if (showProfileModal) {
+        setShowProfileModal(false);
+        return true;
+      }
+      if (showSecurityModal) {
+        setShowSecurityModal(false);
+        return true;
+      }
+      if (showContactModal) {
+        setShowContactModal(false);
+        return true;
+      }
+      if (showPollModal) {
+        setShowPollModal(false);
+        return true;
+      }
+      if (showEventModal) {
+        setShowEventModal(false);
+        return true;
+      }
+      if (showStickerModal) {
+        setShowStickerModal(false);
+        return true;
+      }
+      if (activeMessageMenu) {
+        setActiveMessageMenu(null);
+        return true;
+      }
+      return false;
+    };
+
+    return () => {
+      window.__handleChatInnerBack = null;
+    };
+  }, [
+    previewImage, showEmojiPicker, showAttachmentMenu, 
+    showProfileModal, showSecurityModal, showContactModal, 
+    showPollModal, showEventModal, showStickerModal, activeMessageMenu
+  ]);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
