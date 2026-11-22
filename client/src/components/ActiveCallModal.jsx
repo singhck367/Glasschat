@@ -484,6 +484,25 @@ export default function ActiveCallModal({
     }
   };
 
+  // Guarantee local and remote video tracks are permanently attached to video elements
+  useEffect(() => {
+    if (isVideo && localStreamRef.current && localVideoRef.current) {
+      if (localVideoRef.current.srcObject !== localStreamRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+      localVideoRef.current.play().catch(() => {});
+    }
+  }, [isVideo, isSwappedView, callStatus, isVideoEnabled, facingMode]);
+
+  useEffect(() => {
+    if (isVideo && remoteStreamRef.current && remoteVideoRef.current) {
+      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [isVideo, isSwappedView, hasRemoteVideo]);
+
   // 3. IN-CALL PARTICIPANT INVITATION
   const handleInviteUser = (contact) => {
     if (invitedUsers.has(contact.id)) return;
@@ -612,143 +631,192 @@ export default function ActiveCallModal({
           </div>
         )}
 
-        {/* Top Floating Glass Info Bar with Minimize Button & HD Indicator */}
+        {/* ======================================================= */}
+        {/* TOP BAR HEADER: MINIMAL & PRO (FACETIME / WHATSAPP STYLE) */}
+        {/* ======================================================= */}
         <div style={{
           position: 'absolute',
-          top: 'max(20px, env(safe-area-inset-top, 20px))',
+          top: 'max(16px, env(safe-area-inset-top, 16px))',
           left: 0,
           right: 0,
           display: 'flex',
-          flexDirection: 'column',
           alignItems: 'center',
-          gap: '4px',
+          justifyContent: 'space-between',
+          padding: '0 16px',
           zIndex: 35,
-          pointerEvents: 'none'
+          pointerEvents: 'auto'
         }}>
-          {/* Top-Left Minimize Button */}
-          <button 
-            onClick={() => {
-              triggerHaptic(15);
-              setIsMinimized(true);
-            }}
-            className="glass-btn"
-            style={{
-              position: 'absolute',
-              left: '20px',
-              top: '2px',
-              width: '38px',
-              height: '38px',
-              borderRadius: '50%',
-              backgroundColor: isVideo ? 'rgba(255, 255, 255, 0.18)' : 'rgba(0, 0, 0, 0.06)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              pointerEvents: 'auto'
-            }}
-            title="Minimize Call to browse chats"
-          >
-            <ChevronDown size={22} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />
-          </button>
+          {/* Left: Minimize Call & HD Quality Badge */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button 
+              onClick={() => {
+                triggerHaptic(15);
+                setIsMinimized(true);
+              }}
+              className="glass-btn"
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '50%',
+                backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.85)',
+                border: isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 4px 16px rgba(0, 0, 0, 0.25)'
+              }}
+              title="Minimize Call to browse chats"
+            >
+              <ChevronDown size={22} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />
+            </button>
 
-          {/* Top-Right HD Quality Badge */}
-          <div style={{
-            position: 'absolute',
-            right: '20px',
-            top: '4px',
-            display: 'flex',
-            alignItems: 'center',
-            pointerEvents: 'auto'
-          }}>
             <span className="glass-pill" style={{
-              padding: '4px 10px',
+              padding: '4px 8px',
               fontSize: '11px',
-              fontWeight: '700',
+              fontWeight: '800',
               color: '#10b981',
-              backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255, 255, 255, 0.9)',
+              backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.9)',
               border: '1px solid rgba(16, 185, 129, 0.35)',
               display: 'flex',
               alignItems: 'center',
-              gap: '5px'
+              gap: '4px'
             }}>
-              <Wifi size={12} /> HD
+              <Wifi size={11} /> HD
             </span>
           </div>
 
-          <div className="glass-pill" style={{
-            padding: '6px 18px',
+          {/* Center: Caller Name & Live Call Timer */}
+          <div style={{
             display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
-            gap: '8px',
             backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.75)' : 'rgba(255, 255, 255, 0.88)',
             border: isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)',
-            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
-            pointerEvents: 'auto'
+            padding: '5px 16px',
+            borderRadius: '24px',
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)'
           }}>
-            <span style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: callStatus === 'Connected' ? '#22c55e' : '#f59e0b',
-              borderRadius: '50%',
-              boxShadow: callStatus === 'Connected' ? '0 0 8px #22c55e' : 'none'
-            }} />
-            <span style={{ fontSize: '13px', fontWeight: '800', color: isVideo ? '#ffffff' : 'var(--text-primary)' }}>
-              {callStatus === 'Connected' ? formatDuration(callDuration) : callStatus}
+            <span style={{ 
+              fontSize: '13px', 
+              fontWeight: '800', 
+              color: isVideo ? '#ffffff' : 'var(--text-primary)', 
+              maxWidth: '130px', 
+              overflow: 'hidden', 
+              textOverflow: 'ellipsis', 
+              whiteSpace: 'nowrap' 
+            }}>
+              {callSession.targetName}
             </span>
-            {isScreenSharing && (
-              <span style={{ fontSize: '11px', color: '#38bdf8', fontWeight: '700', marginLeft: '4px' }}>
-                • 🖥️ Screen
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '1px' }}>
+              <span style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                backgroundColor: callStatus === 'Connected' ? '#22c55e' : '#f59e0b',
+                boxShadow: callStatus === 'Connected' ? '0 0 6px #22c55e' : 'none'
+              }} />
+              <span style={{ 
+                fontSize: '11px', 
+                color: isVideo ? (callStatus === 'Connected' ? '#38bdf8' : '#fbbf24') : 'var(--text-secondary)', 
+                fontWeight: '700' 
+              }}>
+                {callStatus === 'Connected' ? formatDuration(callDuration) : callStatus}
               </span>
-            )}
+            </div>
           </div>
 
-          <h2 style={{
-            fontSize: '18px',
-            fontWeight: '800',
-            color: isVideo ? '#ffffff' : 'var(--text-primary)',
-            marginTop: '4px',
-            margin: 0,
-            textShadow: isVideo ? '0 2px 8px rgba(0,0,0,0.6)' : 'none'
-          }}>
-            {callSession.targetName}
-          </h2>
-          <p style={{
-            fontSize: '11px',
-            color: isVideo ? 'rgba(255, 255, 255, 0.8)' : 'var(--text-secondary)',
-            margin: 0,
-            textShadow: isVideo ? '0 1px 4px rgba(0,0,0,0.6)' : 'none'
-          }}>
-            {isVideo ? 'GlassChat HD Video' : 'GlassChat HD Voice'}
-          </p>
+          {/* Right: Speakerphone, Screen Cast & Invite Participant */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* Speakerphone Toggle */}
+            <button 
+              onClick={handleToggleSpeaker}
+              className="glass-btn"
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '50%',
+                backgroundColor: isSpeakerOn ? '#0284c7' : (isVideo ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.85)'),
+                border: isSpeakerOn ? '1.5px solid #38bdf8' : (isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)'),
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: isSpeakerOn ? '0 0 14px rgba(2, 132, 199, 0.5)' : 'none'
+              }}
+              title={isSpeakerOn ? 'Speaker ON (Loudspeaker)' : 'Speaker OFF (Earpiece mode)'}
+            >
+              {isSpeakerOn ? <Volume2 size={18} color="#ffffff" /> : <Volume1 size={18} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />}
+            </button>
+
+            {/* Screen Cast (Video call only) */}
+            {isVideo && (
+              <button 
+                onClick={handleToggleScreenShare}
+                className="glass-btn"
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '50%',
+                  backgroundColor: isScreenSharing ? '#10b981' : 'rgba(15, 23, 42, 0.72)',
+                  border: isScreenSharing ? '1.5px solid #34d399' : '1px solid rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: isScreenSharing ? '0 0 14px rgba(16, 185, 129, 0.5)' : 'none'
+                }}
+                title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Screen'}
+              >
+                <ScreenShare size={18} color="#ffffff" />
+              </button>
+            )}
+
+            {/* Invite Participant */}
+            <button 
+              onClick={() => setShowAddUserModal(true)}
+              className="glass-btn"
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '50%',
+                backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.85)',
+                border: isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+              title="Add participant to call"
+            >
+              <UserPlus size={18} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />
+            </button>
+          </div>
         </div>
 
-      {/* ======================================================= */}
-      {/* MAIN VIEW AREA: TRUE EDGE-TO-EDGE FULLSCREEN VIDEO */}
-      {/* ======================================================= */}
-      <div style={{
-        position: 'absolute',
-        inset: 0,
-        width: '100%',
-        height: '100%',
-        zIndex: 10,
-        backgroundColor: isVideo ? '#020617' : 'transparent',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        overflow: 'hidden'
-      }}>
-        {isVideo ? (
-          <>
-            {/* 1. MAIN FULLSCREEN VIDEO VIEW */}
-            {/* If !isSwappedView: Main is Remote Video. If isSwappedView: Main is Local Video */}
+        {/* ======================================================= */}
+        {/* MAIN VIEW AREA: FULLSCREEN & FLOATING SELF VIDEO (PiP) */}
+        {/* ======================================================= */}
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 10,
+          backgroundColor: isVideo ? '#020617' : 'transparent',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflow: 'hidden'
+        }}>
+          {isVideo ? (
             <div style={{
               position: 'absolute',
               inset: 0,
               width: '100%',
               height: '100%',
-              backgroundColor: '#000000',
+              backgroundColor: '#020617',
               overflow: 'hidden'
             }}>
-              {/* Remote Video Stream (Main when !isSwappedView) */}
+              {/* 1. REMOTE VIDEO (Fullscreen by default, PiP when isSwappedView) */}
               <video 
                 ref={remoteVideoRef} 
                 autoPlay 
@@ -756,390 +824,341 @@ export default function ActiveCallModal({
                 webkit-playsinline="true"
                 muted={true}
                 onLoadedMetadata={() => remoteVideoRef.current?.play().catch(() => {})}
-                style={{
+                onClick={isSwappedView ? () => setIsSwappedView(false) : undefined}
+                style={isSwappedView ? {
+                  position: 'absolute',
+                  top: 'max(84px, env(safe-area-inset-top, 84px))',
+                  right: '16px',
+                  width: '110px',
+                  height: '160px',
+                  borderRadius: '20px',
+                  objectFit: 'cover',
+                  zIndex: 25,
+                  border: '2px solid rgba(255, 255, 255, 0.85)',
+                  boxShadow: '0 12px 32px rgba(0, 0, 0, 0.65)',
+                  cursor: 'pointer',
+                  backgroundColor: '#0f172a'
+                } : {
                   position: 'absolute',
                   inset: 0,
                   width: '100%',
                   height: '100%',
                   objectFit: 'cover',
-                  display: isSwappedView ? 'none' : 'block',
+                  zIndex: 1,
                   backgroundColor: '#000000'
                 }}
               />
 
-              {/* Local Video Stream (Main when isSwappedView) */}
+              {/* Remote Placeholder when connecting / ringing (before remote stream connects) */}
+              {!hasRemoteVideo && !isSwappedView && (
+                <div style={{
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 2,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '16px',
+                  background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.96) 0%, rgba(15, 23, 42, 0.98) 100%)'
+                }}>
+                  <img 
+                    src={callSession.targetAvatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'} 
+                    alt={callSession.targetName}
+                    style={{
+                      width: '120px',
+                      height: '120px',
+                      borderRadius: '50%',
+                      objectFit: 'cover',
+                      border: '4px solid rgba(255, 255, 255, 0.85)',
+                      boxShadow: '0 12px 40px rgba(0, 0, 0, 0.5)'
+                    }}
+                  />
+                  <span className="glass-pill" style={{ 
+                    padding: '6px 18px', 
+                    fontSize: '13px', 
+                    fontWeight: '700', 
+                    color: '#ffffff', 
+                    backgroundColor: 'rgba(255, 255, 255, 0.15)' 
+                  }}>
+                    {callStatus}
+                  </span>
+                </div>
+              )}
+
+              {/* 2. LOCAL VIDEO (SELF VIEW) - ALWAYS VISIBLE! */}
+              {/* Sits in floating PiP by default, Fullscreen when isSwappedView */}
               <video 
                 ref={localVideoRef} 
                 autoPlay 
                 playsInline 
+                webkit-playsinline="true"
                 muted={true}
+                onLoadedMetadata={() => localVideoRef.current?.play().catch(() => {})}
+                onClick={!isSwappedView ? () => setIsSwappedView(true) : undefined}
                 style={{
-                  position: 'absolute',
-                  inset: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  display: isSwappedView ? 'block' : 'none',
-                  transform: (!isScreenSharing && facingMode === 'user') ? 'scaleX(-1)' : 'none',
-                  backgroundColor: '#000000'
+                  ...(isSwappedView ? {
+                    position: 'absolute',
+                    inset: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    zIndex: 1,
+                    backgroundColor: '#000000'
+                  } : {
+                    position: 'absolute',
+                    top: 'max(84px, env(safe-area-inset-top, 84px))',
+                    right: '16px',
+                    width: '110px',
+                    height: '160px',
+                    borderRadius: '20px',
+                    objectFit: 'cover',
+                    zIndex: 25,
+                    border: '2px solid rgba(255, 255, 255, 0.85)',
+                    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.65)',
+                    cursor: 'pointer',
+                    backgroundColor: '#0f172a'
+                  }),
+                  transform: (!isScreenSharing && facingMode === 'user') ? 'scaleX(-1)' : 'none'
                 }}
               />
 
-              {/* Placeholder overlay when waiting for remote video connection */}
-              <div style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '16px',
-                background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.96) 0%, rgba(15, 23, 42, 0.98) 100%)',
-                opacity: hasRemoteVideo ? 0 : 1,
-                pointerEvents: hasRemoteVideo ? 'none' : 'auto',
-                transition: 'opacity 0.4s ease'
+              {/* Overlay if Local Camera is turned off */}
+              {!isVideoEnabled && (
+                <div style={isSwappedView ? {
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 2,
+                  backgroundColor: '#0f172a',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexDirection: 'column',
+                  gap: '12px'
+                } : {
+                  position: 'absolute',
+                  top: 'max(84px, env(safe-area-inset-top, 84px))',
+                  right: '16px',
+                  width: '110px',
+                  height: '160px',
+                  borderRadius: '20px',
+                  zIndex: 26,
+                  backgroundColor: '#0f172a',
+                  border: '2px solid rgba(255, 255, 255, 0.85)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  cursor: 'pointer'
+                }}>
+                  <VideoOff size={isSwappedView ? 36 : 22} color="#ffffff" />
+                  <span style={{ fontSize: isSwappedView ? '13px' : '10px', color: 'rgba(255, 255, 255, 0.8)', fontWeight: '700' }}>
+                    Camera Off
+                  </span>
+                </div>
+              )}
+
+              {/* PiP Tap-to-Swap Pill Hint */}
+              <div 
+                onClick={() => setIsSwappedView(!isSwappedView)}
+                style={{
+                  position: 'absolute',
+                  top: 'max(212px, env(safe-area-inset-top, 212px))',
+                  right: '22px',
+                  zIndex: 30,
+                  padding: '3px 8px',
+                  borderRadius: '12px',
+                  backgroundColor: 'rgba(0, 0, 0, 0.68)',
+                  backdropFilter: 'blur(10px)',
+                  color: '#ffffff',
+                  fontSize: '9px',
+                  fontWeight: '800',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                  border: '1px solid rgba(255, 255, 255, 0.2)'
+                }}
+                title="Tap to swap fullscreen and small view"
+              >
+                <ArrowLeftRight size={10} />
+                <span>{isSwappedView ? (callSession.targetName?.split(' ')[0] || 'Caller') : 'You'}</span>
+              </div>
+            </div>
+          ) : (
+            /* Pure Audio Call Avatar Visualizer */
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '24px'
+            }}>
+              <div className="glow-active" style={{
+                position: 'relative',
+                borderRadius: '50%',
+                padding: '10px',
+                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.5) 0%, rgba(192, 132, 252, 0.5) 100%)'
               }}>
                 <img 
                   src={callSession.targetAvatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'} 
                   alt={callSession.targetName}
                   style={{
-                    width: '120px',
-                    height: '120px',
+                    width: '140px',
+                    height: '140px',
                     borderRadius: '50%',
                     objectFit: 'cover',
-                    border: '4px solid rgba(255, 255, 255, 0.85)',
-                    boxShadow: '0 12px 40px rgba(0, 0, 0, 0.5)'
+                    border: '4px solid rgba(255, 255, 255, 0.95)',
+                    boxShadow: '0 16px 40px rgba(0, 0, 0, 0.15)'
                   }}
                 />
-                <span className="glass-pill" style={{ padding: '6px 18px', fontSize: '13px', fontWeight: '700', color: '#ffffff', backgroundColor: 'rgba(255, 255, 255, 0.15)' }}>
-                  {callStatus}
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
+                <span className="glass-pill" style={{
+                  padding: '6px 20px',
+                  fontSize: '13px',
+                  fontWeight: '700',
+                  color: '#0284c7',
+                  backgroundColor: 'rgba(255, 255, 255, 0.9)'
+                }}>
+                  GlassChat HD Voice • Studio Quality
+                </span>
+                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                  Echo & Noise Cancellation Active
                 </span>
               </div>
             </div>
-
-            {/* 2. FLOATING PIP (TAP-TO-SWAP VIEWS) */}
-            {/* If !isSwappedView: PiP shows Local (Selfie). If isSwappedView: PiP shows Remote */}
-            <div 
-              onClick={() => setIsSwappedView(!isSwappedView)}
-              className="glass-panel" 
-              title="Tap to switch fullscreen view"
-              style={{
-                position: 'absolute',
-                top: 'max(80px, env(safe-area-inset-top, 80px))',
-                right: '16px',
-                width: '105px',
-                height: '155px',
-                borderRadius: '20px',
-                overflow: 'hidden',
-                border: '2px solid rgba(255, 255, 255, 0.85)',
-                boxShadow: '0 12px 32px rgba(0, 0, 0, 0.55)',
-                zIndex: 25,
-                cursor: 'pointer',
-                backgroundColor: '#020617',
-                transition: 'transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
-              }}
-            >
-              {/* Remote in PiP if isSwappedView */}
-              {isSwappedView ? (
-                <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-                  <img
-                    src={callSession.targetAvatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'}
-                    alt="Peer"
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover'
-                    }}
-                  />
-                  <div style={{
-                    position: 'absolute',
-                    bottom: '6px',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    padding: '2px 8px',
-                    borderRadius: '10px',
-                    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-                    color: '#ffffff',
-                    fontSize: '9px',
-                    fontWeight: '800',
-                    whiteSpace: 'nowrap',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px'
-                  }}>
-                    <ArrowLeftRight size={10} />
-                    <span>{callSession.targetName?.split(' ')[0] || 'Caller'}</span>
-                  </div>
-                </div>
-              ) : (
-                /* Local in PiP if !isSwappedView */
-                <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-                  <img
-                    src={currentUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'}
-                    alt="You"
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                      opacity: isVideoEnabled ? 0.3 : 1
-                    }}
-                  />
-                  <div style={{
-                    position: 'absolute',
-                    bottom: '6px',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    padding: '2px 8px',
-                    borderRadius: '10px',
-                    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-                    color: '#ffffff',
-                    fontSize: '9px',
-                    fontWeight: '800',
-                    whiteSpace: 'nowrap',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px'
-                  }}>
-                    <ArrowLeftRight size={10} />
-                    <span>You (Tap to swap)</span>
-                  </div>
-
-                  {!isVideoEnabled && (
-                    <div style={{
-                      position: 'absolute',
-                      inset: 0,
-                      backgroundColor: 'rgba(15, 23, 42, 0.92)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: '#ffffff'
-                    }}>
-                      <VideoOff size={20} />
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </>
-        ) : (
-          /* Pure Audio Call Avatar Visualizer */
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '24px'
-          }}>
-            <div className="glow-active" style={{
-              position: 'relative',
-              borderRadius: '50%',
-              padding: '10px',
-              background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.5) 0%, rgba(192, 132, 252, 0.5) 100%)'
-            }}>
-              <img 
-                src={callSession.targetAvatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'} 
-                alt={callSession.targetName}
-                style={{
-                  width: '140px',
-                  height: '140px',
-                  borderRadius: '50%',
-                  objectFit: 'cover',
-                  border: '4px solid rgba(255, 255, 255, 0.95)',
-                  boxShadow: '0 16px 40px rgba(0, 0, 0, 0.15)'
-                }}
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
-              <span className="glass-pill" style={{
-                padding: '6px 20px',
-                fontSize: '13px',
-                fontWeight: '700',
-                color: '#0284c7',
-                backgroundColor: 'rgba(255, 255, 255, 0.9)'
-              }}>
-                GlassChat HD Voice • Studio Quality
-              </span>
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                Echo & Noise Cancellation Active
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ======================================================= */}
-      {/* FLOATING ACTION CONTROL BAR (GLASS DOCK) */}
-      {/* ======================================================= */}
-      <div style={{
-        position: 'absolute',
-        bottom: 'max(24px, env(safe-area-inset-bottom, 24px))',
-        left: 0,
-        right: 0,
-        display: 'flex',
-        justifyContent: 'center',
-        zIndex: 35,
-        padding: '0 16px'
-      }}>
-        <div className="glass-panel" style={{
-          borderRadius: '36px',
-          padding: '10px 18px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '10px',
-          border: isVideo ? '1px solid rgba(255, 255, 255, 0.25)' : '1px solid rgba(255, 255, 255, 0.9)',
-          backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.9)',
-          boxShadow: '0 16px 48px rgba(0, 0, 0, 0.35)',
-          maxWidth: '100%',
-          overflowX: 'auto'
-        }}>
-          {/* 1. Mute toggle */}
-          <button 
-            onClick={handleToggleMute}
-            className="glass-btn"
-            style={{
-              width: '44px',
-              height: '44px',
-              borderRadius: '22px',
-              backgroundColor: isMuted ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.15)',
-              borderColor: isMuted ? '#ef4444' : 'transparent'
-            }}
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? <MicOff size={19} color="#ef4444" /> : <Mic size={19} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />}
-          </button>
-
-          {/* 2. Speakerphone / Earpiece Toggle */}
-          <button 
-            onClick={handleToggleSpeaker}
-            className="glass-btn"
-            style={{
-              width: '44px',
-              height: '44px',
-              borderRadius: '22px',
-              backgroundColor: isSpeakerOn ? '#0284c7' : 'rgba(255, 255, 255, 0.15)',
-              borderColor: isSpeakerOn ? '#0284c7' : 'transparent',
-              boxShadow: isSpeakerOn ? '0 4px 14px rgba(2, 132, 199, 0.45)' : 'none'
-            }}
-            title={isSpeakerOn ? 'Speaker ON (Loudspeaker)' : 'Speaker OFF (Earpiece mode)'}
-          >
-            {isSpeakerOn ? <Volume2 size={19} color="#ffffff" /> : <Volume1 size={19} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />}
-          </button>
-
-          {/* 3. Toggle Video Camera */}
-          {isVideo && (
-            <button 
-              onClick={handleToggleVideo}
-              className="glass-btn"
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '22px',
-                backgroundColor: !isVideoEnabled ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.15)',
-                borderColor: !isVideoEnabled ? '#ef4444' : 'transparent'
-              }}
-              title={isVideoEnabled ? 'Turn Camera Off' : 'Turn Camera On'}
-            >
-              {isVideoEnabled ? <Video size={19} color="#ffffff" /> : <VideoOff size={19} color="#ef4444" />}
-            </button>
           )}
-
-          {/* 4. Flip Camera (Front <-> Back) */}
-          {isVideo && (
-            <button 
-              onClick={handleFlipCamera}
-              disabled={isFlippingCamera || isScreenSharing}
-              className="glass-btn"
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '22px',
-                backgroundColor: facingMode === 'environment' ? '#8b5cf6' : 'rgba(255, 255, 255, 0.15)',
-                borderColor: facingMode === 'environment' ? '#8b5cf6' : 'transparent',
-                boxShadow: facingMode === 'environment' ? '0 4px 14px rgba(139, 92, 246, 0.45)' : 'none',
-                opacity: isScreenSharing ? 0.4 : 1
-              }}
-              title={`Switch to ${facingMode === 'user' ? 'Back' : 'Front'} Camera`}
-            >
-              <SwitchCamera size={19} color="#ffffff" />
-            </button>
-          )}
-
-          {/* 5. Screen Cast / Screen Share */}
-          {isVideo && (
-            <button 
-              onClick={handleToggleScreenShare}
-              className="glass-btn"
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '22px',
-                backgroundColor: isScreenSharing ? '#10b981' : 'rgba(255, 255, 255, 0.15)',
-                borderColor: isScreenSharing ? '#10b981' : 'transparent',
-                boxShadow: isScreenSharing ? '0 4px 14px rgba(16, 185, 129, 0.45)' : 'none'
-              }}
-              title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Device Screen'}
-            >
-              <ScreenShare size={19} color="#ffffff" />
-            </button>
-          )}
-
-          {/* 6. Add Participant (+ Invite User) */}
-          <button 
-            onClick={() => setShowAddUserModal(true)}
-            className="glass-btn"
-            style={{
-              width: '44px',
-              height: '44px',
-              borderRadius: '22px',
-              backgroundColor: 'rgba(255, 255, 255, 0.15)'
-            }}
-            title="Invite another person to this call"
-          >
-            <UserPlus size={19} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />
-          </button>
-
-          {/* 7. Swap Views Button (also tapped on PiP) */}
-          {isVideo && (
-            <button 
-              onClick={() => setIsSwappedView(!isSwappedView)}
-              className="glass-btn"
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '22px',
-                backgroundColor: isSwappedView ? '#f59e0b' : 'rgba(255, 255, 255, 0.15)',
-                borderColor: isSwappedView ? '#f59e0b' : 'transparent'
-              }}
-              title="Swap main & floating video"
-            >
-              <ArrowLeftRight size={18} color="#ffffff" />
-            </button>
-          )}
-
-          {/* 8. End Call Button */}
-          <button 
-            onClick={() => {
-              socket.emit('end-call', { to: callSession.targetId });
-              stopMediaStream(localStreamRef.current);
-              stopMediaStream(remoteStreamRef.current);
-              if (pcRef.current) pcRef.current.close();
-              onEndCall();
-            }}
-            className="glass-btn glass-btn-danger"
-            style={{
-              width: '48px',
-              height: '48px',
-              borderRadius: '24px',
-              marginLeft: '4px'
-            }}
-            title="End Call"
-          >
-            <PhoneOff size={20} />
-          </button>
         </div>
-      </div>
+
+        {/* ======================================================= */}
+        {/* FLOATING ACTION CONTROL BAR (CLEAN PRO 4-BUTTON DOCK)   */}
+        {/* ======================================================= */}
+        <div style={{
+          position: 'absolute',
+          bottom: 'max(28px, env(safe-area-inset-bottom, 28px))',
+          left: 0,
+          right: 0,
+          display: 'flex',
+          justifyContent: 'center',
+          zIndex: 35,
+          padding: '0 20px'
+        }}>
+          <div className="glass-panel" style={{
+            borderRadius: '44px',
+            padding: '12px 24px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '18px',
+            border: isVideo ? '1px solid rgba(255, 255, 255, 0.22)' : '1px solid rgba(0, 0, 0, 0.08)',
+            backgroundColor: isVideo ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.92)',
+            backdropFilter: 'blur(24px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+            boxShadow: '0 20px 50px rgba(0, 0, 0, 0.45)'
+          }}>
+            {/* 1. Camera Flip (Front <-> Back) */}
+            {isVideo && (
+              <button 
+                onClick={handleFlipCamera}
+                disabled={isFlippingCamera || isScreenSharing}
+                className="glass-btn"
+                style={{
+                  width: '52px',
+                  height: '52px',
+                  borderRadius: '50%',
+                  backgroundColor: facingMode === 'environment' ? 'rgba(139, 92, 246, 0.35)' : 'rgba(255, 255, 255, 0.14)',
+                  border: facingMode === 'environment' ? '1.5px solid #a78bfa' : '1px solid rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: facingMode === 'environment' ? '0 0 16px rgba(139, 92, 246, 0.5)' : 'none',
+                  transition: 'all 0.2s ease',
+                  opacity: isScreenSharing ? 0.4 : 1
+                }}
+                title={`Flip to ${facingMode === 'user' ? 'Back' : 'Front'} Camera`}
+              >
+                <SwitchCamera size={22} color="#ffffff" />
+              </button>
+            )}
+
+            {/* 2. Video Camera Toggle */}
+            {isVideo && (
+              <button 
+                onClick={handleToggleVideo}
+                className="glass-btn"
+                style={{
+                  width: '52px',
+                  height: '52px',
+                  borderRadius: '50%',
+                  backgroundColor: !isVideoEnabled ? 'rgba(239, 68, 68, 0.35)' : 'rgba(255, 255, 255, 0.14)',
+                  border: !isVideoEnabled ? '1.5px solid #ef4444' : '1px solid rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: !isVideoEnabled ? '0 0 16px rgba(239, 68, 68, 0.5)' : 'none',
+                  transition: 'all 0.2s ease'
+                }}
+                title={isVideoEnabled ? 'Turn Camera Off' : 'Turn Camera On'}
+              >
+                {isVideoEnabled ? <Video size={22} color="#ffffff" /> : <VideoOff size={22} color="#ef4444" />}
+              </button>
+            )}
+
+            {/* 3. Microphone Mute Toggle */}
+            <button 
+              onClick={handleToggleMute}
+              className="glass-btn"
+              style={{
+                width: '52px',
+                height: '52px',
+                borderRadius: '50%',
+                backgroundColor: isMuted ? 'rgba(239, 68, 68, 0.35)' : (isVideo ? 'rgba(255, 255, 255, 0.14)' : 'rgba(0, 0, 0, 0.06)'),
+                border: isMuted ? '1.5px solid #ef4444' : (isVideo ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 0, 0, 0.08)'),
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: isMuted ? '0 0 16px rgba(239, 68, 68, 0.5)' : 'none',
+                transition: 'all 0.2s ease'
+              }}
+              title={isMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+            >
+              {isMuted ? <MicOff size={22} color="#ef4444" /> : <Mic size={22} color={isVideo ? '#ffffff' : 'var(--text-primary)'} />}
+            </button>
+
+            {/* 4. End Call Button (Big Red Ruby Button) */}
+            <button 
+              onClick={() => {
+                triggerHaptic([30, 40, 50]);
+                playCallEndedTone();
+                socket.emit('end-call', { to: callSession.targetId });
+                stopMediaStream(localStreamRef.current);
+                stopMediaStream(remoteStreamRef.current);
+                if (pcRef.current) pcRef.current.close();
+                onEndCall();
+              }}
+              className="glass-btn"
+              style={{
+                width: '56px',
+                height: '56px',
+                borderRadius: '50%',
+                backgroundColor: '#ef4444',
+                border: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 8px 24px rgba(239, 68, 68, 0.55)',
+                marginLeft: '4px',
+                transition: 'transform 0.15s ease'
+              }}
+              title="End Call"
+            >
+              <PhoneOff size={24} color="#ffffff" />
+            </button>
+          </div>
+        </div>
 
       {/* ======================================================= */}
       {/* IN-CALL ADD PARTICIPANTS MODAL SHEET */}
