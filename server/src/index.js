@@ -91,6 +91,15 @@ app.get('/download-apk', (req, res) => {
   res.status(404).send('APK file not hosted directly on this instance.');
 });
 
+// Download iOS IPA package route
+app.get('/download-ipa', (req, res) => {
+  const ipaPath = path.resolve(__dirname, '../../GlassChat.ipa');
+  if (fs.existsSync(ipaPath)) {
+    return res.download(ipaPath, 'GlassChat.ipa');
+  }
+  res.status(404).send('IPA file not hosted directly on this instance.');
+});
+
 // API Routes
 app.use('/api', apiRoutes);
 

@@ -10,6 +10,8 @@ client/android/.gradle/
 .gradle/
 *.apk
 !GlassChat.apk
+*.ipa
+!GlassChat.ipa
 
 # Large binaries & tools
 cloudflared.exe
