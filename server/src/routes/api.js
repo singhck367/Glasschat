@@ -911,7 +911,7 @@ router.get('/app-version', (req, res) => {
       '🔄 Tap-to-Swap Video Views (toggle PiP and main camera with 1 tap)',
       '🔊 Studio-Grade Audio Engine with Zero-Echo Crystal Voice'
     ],
-    downloadUrl: 'https://github.com/singhck367/Glasschat/releases/download/v1.0.0/GlassChat.apk',
+    downloadUrl: '/download-apk',
     forceUpdate: false
   });
 });

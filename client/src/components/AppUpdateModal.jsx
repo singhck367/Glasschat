@@ -1,12 +1,138 @@
-import React from 'react';
-import { Sparkles, Download, X, CheckCircle2, ArrowUpCircle, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Download, X, CheckCircle2, ArrowUpCircle, ShieldCheck, RefreshCw, AlertCircle } from 'lucide-react';
+import { getServerBaseUrl } from '../services/config';
 
 export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '1.0.0' }) {
   if (!updateInfo) return null;
 
-  const handleDownload = () => {
-    if (updateInfo.downloadUrl) {
-      window.open(updateInfo.downloadUrl, '_blank');
+  // 'idle' | 'downloading' | 'ready' | 'error'
+  const [downloadStatus, setDownloadStatus] = useState('idle');
+  const [progress, setProgress] = useState(0);
+  const [downloadedMb, setDownloadedMb] = useState('0');
+  const [totalMb, setTotalMb] = useState('3.7');
+  const [errorMsg, setErrorMsg] = useState('');
+  const downloadedBlobRef = useRef(null);
+
+  // Clean up global callbacks on unmount
+  useEffect(() => {
+    return () => {
+      window.__onApkDownloadProgress = null;
+      window.__onApkDownloadComplete = null;
+      window.__onApkDownloadError = null;
+    };
+  }, []);
+
+  const resolveDownloadUrl = () => {
+    const rawUrl = updateInfo.downloadUrl || '/download-apk';
+    if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+      return rawUrl;
+    }
+    const base = getServerBaseUrl().replace(/\/+$/, '');
+    const path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
+    return `${base}${path}`;
+  };
+
+  const handleStartDownload = async () => {
+    setDownloadStatus('downloading');
+    setProgress(0);
+    setErrorMsg('');
+
+    const targetUrl = resolveDownloadUrl();
+
+    // 1. Native Android Capacitor App via AndroidInstaller Bridge
+    if (typeof window !== 'undefined' && window.AndroidInstaller) {
+      window.__onApkDownloadProgress = (percent, curBytes, totBytes) => {
+        setProgress(Math.min(100, Math.max(0, percent)));
+        if (totBytes > 0) {
+          setDownloadedMb((curBytes / (1024 * 1024)).toFixed(1));
+          setTotalMb((totBytes / (1024 * 1024)).toFixed(1));
+        }
+      };
+
+      window.__onApkDownloadComplete = () => {
+        setProgress(100);
+        setDownloadStatus('ready');
+      };
+
+      window.__onApkDownloadError = (err) => {
+        console.error('Native APK download error:', err);
+        setDownloadStatus('error');
+        setErrorMsg(err || 'Failed to download update package.');
+      };
+
+      try {
+        window.AndroidInstaller.startDownload(targetUrl);
+      } catch (e) {
+        console.error('AndroidInstaller call failed:', e);
+        setDownloadStatus('error');
+        setErrorMsg(e.message || 'Could not start background downloader.');
+      }
+      return;
+    }
+
+    // 2. Web browser fallback with in-app streaming download
+    try {
+      const response = await fetch(targetUrl);
+      if (!response.ok) {
+        throw new Error(`Server returned HTTP ${response.status}`);
+      }
+
+      const contentLength = +response.headers.get('Content-Length') || 3950002;
+      setTotalMb((contentLength / (1024 * 1024)).toFixed(1));
+
+      const reader = response.body.getReader();
+      let receivedLength = 0;
+      const chunks = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        receivedLength += value.length;
+
+        const pct = Math.min(99, Math.round((receivedLength / contentLength) * 100));
+        setProgress(pct);
+        setDownloadedMb((receivedLength / (1024 * 1024)).toFixed(1));
+      }
+
+      const blob = new Blob(chunks, { type: 'application/vnd.android.package-archive' });
+      downloadedBlobRef.current = blob;
+      setProgress(100);
+      setDownloadStatus('ready');
+
+    } catch (err) {
+      console.error('Web download error:', err);
+      setDownloadStatus('error');
+      setErrorMsg(err.message || 'Network error while downloading.');
+    }
+  };
+
+  const handleInstallNow = () => {
+    // Native APK Installer
+    if (typeof window !== 'undefined' && window.AndroidInstaller) {
+      try {
+        window.AndroidInstaller.installDownloadedApk();
+      } catch (e) {
+        console.error('Install call error:', e);
+        alert('Could not launch system installer: ' + e.message);
+      }
+      return;
+    }
+
+    // Web browser fallback: trigger save file
+    if (downloadedBlobRef.current) {
+      const url = URL.createObjectURL(downloadedBlobRef.current);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'GlassChat.apk';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 1000);
+    } else {
+      window.open(resolveDownloadUrl(), '_blank');
     }
   };
 
@@ -18,9 +144,9 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
       right: 0,
       bottom: 0,
       zIndex: 200,
-      backgroundColor: 'rgba(15, 23, 42, 0.75)',
-      backdropFilter: 'blur(20px) saturate(180%)',
-      WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+      backgroundColor: 'rgba(15, 23, 42, 0.78)',
+      backdropFilter: 'blur(24px) saturate(180%)',
+      WebkitBackdropFilter: 'blur(24px) saturate(180%)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -30,11 +156,11 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
         className="glass-panel" 
         style={{
           width: '100%',
-          maxWidth: '440px',
-          borderRadius: '28px',
+          maxWidth: '430px',
+          borderRadius: '30px',
           padding: '26px 22px',
-          backgroundColor: 'rgba(255, 255, 255, 0.94)',
-          boxShadow: '0 24px 60px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.9)',
+          backgroundColor: 'rgba(255, 255, 255, 0.95)',
+          boxShadow: '0 28px 70px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.9)',
           position: 'relative',
           overflow: 'hidden',
           animation: 'glassModalEnter 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
@@ -55,7 +181,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
         }} />
 
         {/* Close Button */}
-        {!updateInfo.forceUpdate && (
+        {!updateInfo.forceUpdate && downloadStatus !== 'downloading' && (
           <button
             onClick={onClose}
             className="glass-btn"
@@ -82,13 +208,22 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
             width: '52px',
             height: '52px',
             borderRadius: '18px',
-            background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+            background: downloadStatus === 'ready' 
+              ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+              : 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            boxShadow: '0 8px 24px rgba(2, 132, 199, 0.35)'
+            boxShadow: downloadStatus === 'ready'
+              ? '0 8px 24px rgba(16, 185, 129, 0.35)'
+              : '0 8px 24px rgba(2, 132, 199, 0.35)',
+            transition: 'all 0.3s ease'
           }}>
-            <ArrowUpCircle size={28} color="#ffffff" />
+            {downloadStatus === 'ready' ? (
+              <CheckCircle2 size={28} color="#ffffff" />
+            ) : (
+              <ArrowUpCircle size={28} color="#ffffff" />
+            )}
           </div>
 
           <div>
@@ -97,10 +232,10 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 padding: '2px 8px',
                 fontSize: '11px',
                 fontWeight: '800',
-                color: '#0284c7',
-                backgroundColor: 'rgba(2, 132, 199, 0.12)'
+                color: downloadStatus === 'ready' ? '#059669' : '#0284c7',
+                backgroundColor: downloadStatus === 'ready' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(2, 132, 199, 0.12)'
               }}>
-                UPDATE AVAILABLE
+                {downloadStatus === 'ready' ? 'READY TO INSTALL' : (downloadStatus === 'downloading' ? 'DOWNLOADING UPDATE' : 'UPDATE AVAILABLE')}
               </span>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: '600' }}>
                 v{updateInfo.latestVersion || '1.2.0'}
@@ -125,56 +260,140 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
           fontSize: '12px'
         }}>
           <span style={{ color: 'var(--text-secondary)' }}>Installed: <strong>v{currentVersion}</strong></span>
-          <span style={{ color: '#0284c7', fontWeight: '800' }}>Latest: <strong>v{updateInfo.latestVersion || '1.2.0'}</strong></span>
+          <span style={{ color: '#0284c7', fontWeight: '800' }}>Latest: <strong>v{updateInfo.latestVersion || '1.2.0'}</strong> (3.7 MB)</span>
         </div>
 
-        {/* Release Notes */}
-        <div style={{ marginBottom: '20px' }}>
-          <h4 style={{ fontSize: '12px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-            What's New in this Release:
-          </h4>
-          <div style={{
-            maxHeight: '180px',
-            overflowY: 'auto',
-            padding: '10px 12px',
-            borderRadius: '16px',
-            backgroundColor: 'rgba(255, 255, 255, 0.7)',
-            border: '1px solid rgba(0, 0, 0, 0.05)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '8px'
-          }}>
-            {Array.isArray(updateInfo.releaseNotes) ? (
-              updateInfo.releaseNotes.map((note, index) => (
-                <div key={index} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12px', color: 'var(--text-primary)', lineHeight: '1.4' }}>
-                  <CheckCircle2 size={14} color="#10b981" style={{ flexShrink: 0, marginTop: '2px' }} />
-                  <span>{note}</span>
-                </div>
-              ))
-            ) : (
-              <p style={{ fontSize: '12px', color: 'var(--text-primary)', margin: 0 }}>
-                {updateInfo.releaseNotes || 'Performance improvements, bug fixes and new advance call features.'}
-              </p>
-            )}
+        {/* Dynamic Body: Release Notes or Download Progress */}
+        {downloadStatus === 'idle' && (
+          <div style={{ marginBottom: '18px' }}>
+            <h4 style={{ fontSize: '12px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+              What's New in this Release:
+            </h4>
+            <div style={{
+              maxHeight: '170px',
+              overflowY: 'auto',
+              padding: '10px 12px',
+              borderRadius: '16px',
+              backgroundColor: 'rgba(255, 255, 255, 0.7)',
+              border: '1px solid rgba(0, 0, 0, 0.05)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            }}>
+              {Array.isArray(updateInfo.releaseNotes) ? (
+                updateInfo.releaseNotes.map((note, index) => (
+                  <div key={index} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12px', color: 'var(--text-primary)', lineHeight: '1.4' }}>
+                    <CheckCircle2 size={14} color="#10b981" style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <span>{note}</span>
+                  </div>
+                ))
+              ) : (
+                <p style={{ fontSize: '12px', color: 'var(--text-primary)', margin: 0 }}>
+                  {updateInfo.releaseNotes || 'Performance improvements, bug fixes and new advance call features.'}
+                </p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* DOWNLOADING STATE UI */}
+        {downloadStatus === 'downloading' && (
+          <div style={{
+            padding: '18px 16px',
+            borderRadius: '20px',
+            backgroundColor: 'rgba(2, 132, 199, 0.04)',
+            border: '1px solid rgba(2, 132, 199, 0.12)',
+            marginBottom: '18px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <RefreshCw size={15} color="#0284c7" style={{ animation: 'spin 1.2s linear infinite' }} />
+                <span style={{ fontSize: '13px', fontWeight: '800', color: '#0284c7' }}>Downloading Update...</span>
+              </div>
+              <span style={{ fontSize: '13px', fontWeight: '800', color: '#0284c7' }}>{progress}%</span>
+            </div>
+
+            {/* Sleek Progress Bar */}
+            <div style={{
+              width: '100%',
+              height: '8px',
+              borderRadius: '999px',
+              backgroundColor: 'rgba(0, 0, 0, 0.08)',
+              overflow: 'hidden',
+              marginBottom: '10px'
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${progress}%`,
+                background: 'linear-gradient(90deg, #0284c7 0%, #6366f1 100%)',
+                borderRadius: '999px',
+                transition: 'width 0.25s ease'
+              }} />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-secondary)' }}>
+              <span>{downloadedMb} MB of {totalMb} MB</span>
+              <span>Downloading internally...</span>
+            </div>
+          </div>
+        )}
+
+        {/* READY / COMPLETED STATE UI */}
+        {downloadStatus === 'ready' && (
+          <div style={{
+            padding: '16px',
+            borderRadius: '20px',
+            backgroundColor: 'rgba(16, 185, 129, 0.08)',
+            border: '1px solid rgba(16, 185, 129, 0.2)',
+            marginBottom: '18px',
+            textAlign: 'center'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '4px' }}>
+              <CheckCircle2 size={18} color="#10b981" />
+              <span style={{ fontSize: '14px', fontWeight: '800', color: '#065f46' }}>Download Completed!</span>
+            </div>
+            <p style={{ fontSize: '12px', color: '#047857', margin: 0 }}>
+              The update is ready to install directly without leaving the app.
+            </p>
+          </div>
+        )}
+
+        {/* ERROR STATE UI */}
+        {downloadStatus === 'error' && (
+          <div style={{
+            padding: '14px',
+            borderRadius: '16px',
+            backgroundColor: 'rgba(239, 68, 68, 0.08)',
+            border: '1px solid rgba(239, 68, 68, 0.2)',
+            marginBottom: '18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px'
+          }}>
+            <AlertCircle size={20} color="#ef4444" style={{ flexShrink: 0 }} />
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: '700', color: '#b91c1c' }}>Download Failed</div>
+              <div style={{ fontSize: '11px', color: '#dc2626' }}>{errorMsg || 'Please check your internet connection.'}</div>
+            </div>
+          </div>
+        )}
 
         {/* Security badge */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '18px', fontSize: '11px', color: '#10b981' }}>
           <ShieldCheck size={14} />
-          <span>Official Verified Release • Safe to Install</span>
+          <span>Verified In-App Update Engine • 100% Safe & Direct</span>
         </div>
 
-        {/* Actions */}
+        {/* Actions Button Bar */}
         <div style={{ display: 'flex', gap: '10px' }}>
-          {!updateInfo.forceUpdate && (
+          {!updateInfo.forceUpdate && downloadStatus !== 'downloading' && (
             <button
               onClick={onClose}
               className="glass-btn"
               style={{
                 flex: 1,
-                height: '44px',
-                borderRadius: '14px',
+                height: '46px',
+                borderRadius: '16px',
                 fontWeight: '700',
                 fontSize: '13px',
                 color: 'var(--text-secondary)'
@@ -184,25 +403,96 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
             </button>
           )}
 
-          <button
-            onClick={handleDownload}
-            className="glass-btn glass-btn-primary"
-            style={{
-              flex: 2,
-              height: '44px',
-              borderRadius: '14px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              fontWeight: '800',
-              fontSize: '13px',
-              boxShadow: '0 8px 20px rgba(2, 132, 199, 0.35)'
-            }}
-          >
-            <Download size={16} />
-            Update Now (Download APK)
-          </button>
+          {downloadStatus === 'idle' && (
+            <button
+              onClick={handleStartDownload}
+              className="glass-btn glass-btn-primary"
+              style={{
+                flex: 2,
+                height: '46px',
+                borderRadius: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                fontWeight: '800',
+                fontSize: '13px',
+                background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+                boxShadow: '0 8px 24px rgba(2, 132, 199, 0.35)'
+              }}
+            >
+              <Download size={16} />
+              Download Update (3.7 MB)
+            </button>
+          )}
+
+          {downloadStatus === 'downloading' && (
+            <button
+              disabled
+              style={{
+                flex: 1,
+                height: '46px',
+                borderRadius: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                fontWeight: '800',
+                fontSize: '13px',
+                color: '#ffffff',
+                backgroundColor: 'rgba(2, 132, 199, 0.5)',
+                cursor: 'not-allowed',
+                border: 'none'
+              }}
+            >
+              <RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} />
+              Downloading ({progress}%)...
+            </button>
+          )}
+
+          {downloadStatus === 'ready' && (
+            <button
+              onClick={handleInstallNow}
+              className="glass-btn glass-btn-primary"
+              style={{
+                flex: 2,
+                height: '46px',
+                borderRadius: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                fontWeight: '800',
+                fontSize: '13px',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                boxShadow: '0 8px 24px rgba(16, 185, 129, 0.35)'
+              }}
+            >
+              <CheckCircle2 size={16} />
+              Install & Update Now 🚀
+            </button>
+          )}
+
+          {downloadStatus === 'error' && (
+            <button
+              onClick={handleStartDownload}
+              className="glass-btn glass-btn-primary"
+              style={{
+                flex: 2,
+                height: '46px',
+                borderRadius: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                fontWeight: '800',
+                fontSize: '13px'
+              }}
+            >
+              <RefreshCw size={16} />
+              Retry Download
+            </button>
+          )}
         </div>
       </div>
     </div>

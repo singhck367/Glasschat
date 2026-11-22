@@ -9,7 +9,7 @@ client/android/app/build/
 client/android/.gradle/
 .gradle/
 *.apk
-GlassChat.apk
+!GlassChat.apk
 
 # Large binaries & tools
 cloudflared.exe
