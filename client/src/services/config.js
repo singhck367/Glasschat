@@ -1,6 +1,6 @@
 // GlassChat Server Configuration
-// Active Cloudflare Tunnel URL
-export const SERVER_URL = 'https://constraints-mode-anthropology-individuals.trycloudflare.com';
+// Permanent 24/7 Cloud Render URL
+export const SERVER_URL = 'https://glasschat-vt5f.onrender.com';
 export const LOCAL_FALLBACK_URL = 'http://192.168.1.4:5000';
 
 export function getServerBaseUrl() {
