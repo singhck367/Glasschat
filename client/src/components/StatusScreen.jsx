@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Camera, Plus, Eye, X, Image as ImageIcon, Type, Send, ChevronRight, 
-  Trash2, Clock, Check, Sparkles 
+  Trash2, Clock, Check, Sparkles, ChevronUp, CheckCheck
 } from 'lucide-react';
 
 export default function StatusScreen({ currentUser, socket }) {
@@ -10,6 +10,10 @@ export default function StatusScreen({ currentUser, socket }) {
   const [activeStoryIndex, setActiveStoryIndex] = useState(0);
   const [storyProgress, setStoryProgress] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Status Viewers Modal State (Who saw your status)
+  const [showViewersModal, setShowViewersModal] = useState(false);
+  const [selectedStatusForViewers, setSelectedStatusForViewers] = useState(null);
 
   // New Status Modal State
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -49,13 +53,26 @@ export default function StatusScreen({ currentUser, socket }) {
     const handleDeleteStatus = ({ id }) => {
       setStatuses(prev => prev.filter(s => s.id !== id));
     };
+    const handleStatusViewed = ({ statusId, view }) => {
+      setStatuses(prev => prev.map(s => {
+        if (s.id === statusId) {
+          const currentViews = s.views || [];
+          if (!currentViews.some(v => v.userId === view.userId)) {
+            return { ...s, views: [...currentViews, view] };
+          }
+        }
+        return s;
+      }));
+    };
 
     socket?.on('new-status', handleNewStatus);
     socket?.on('status-deleted', handleDeleteStatus);
+    socket?.on('status-viewed', handleStatusViewed);
 
     return () => {
       socket?.off('new-status', handleNewStatus);
       socket?.off('status-deleted', handleDeleteStatus);
+      socket?.off('status-viewed', handleStatusViewed);
     };
   }, [socket]);
 
@@ -299,8 +316,34 @@ export default function StatusScreen({ currentUser, socket }) {
           </div>
         </div>
 
-        {/* Quick Actions: Camera & Text status */}
-        <div style={{ display: 'flex', gap: '8px' }}>
+        {/* Quick Actions: Viewers, Camera & Text status */}
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          {myStatuses.length > 0 && (
+            <button
+              onClick={() => {
+                setSelectedStatusForViewers(myStatuses[0]);
+                setShowViewersModal(true);
+              }}
+              className="glass-btn"
+              style={{
+                height: '38px',
+                padding: '0 12px',
+                borderRadius: '19px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: '700',
+                color: '#0284c7',
+                backgroundColor: 'rgba(2, 132, 199, 0.12)'
+              }}
+              title="See who viewed your status updates"
+            >
+              <Eye size={15} />
+              <span>{myStatuses.reduce((acc, s) => acc + (s.views?.length || 0), 0)} views</span>
+            </button>
+          )}
+
           <button
             onClick={() => fileInputRef.current?.click()}
             className="glass-btn"
@@ -744,11 +787,164 @@ export default function StatusScreen({ currentUser, socket }) {
             )}
 
             {activeStoryGroup[activeStoryIndex]?.userId === currentUser?.id && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', opacity: 0.85 }}>
-                <Eye size={14} />
-                <span>{activeStoryGroup[activeStoryIndex]?.views?.length || 0} views</span>
+              <div 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsPaused(true);
+                  setSelectedStatusForViewers(activeStoryGroup[activeStoryIndex]);
+                  setShowViewersModal(true);
+                }}
+                className="glass-pill glow-active"
+                style={{
+                  padding: '7px 20px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.22)',
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  cursor: 'pointer',
+                  border: '1px solid rgba(255, 255, 255, 0.4)',
+                  boxShadow: '0 4px 18px rgba(0, 0, 0, 0.35)',
+                  pointerEvents: 'auto'
+                }}
+                title="Tap to see who viewed this status"
+              >
+                <Eye size={16} color="#38bdf8" />
+                <span style={{ fontSize: '13px', fontWeight: '800' }}>
+                  {activeStoryGroup[activeStoryIndex]?.views?.length || 0} views • Who viewed
+                </span>
+                <ChevronUp size={15} />
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================= */}
+      {/* STATUS VIEWERS BOTTOM SHEET (WHO VIEWED YOUR STATUS) */}
+      {/* ======================================================= */}
+      {showViewersModal && selectedStatusForViewers && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 160,
+          backgroundColor: 'rgba(15, 23, 42, 0.72)',
+          backdropFilter: 'blur(16px)',
+          display: 'flex',
+          alignItems: 'flex-end',
+          justifyContent: 'center'
+        }}>
+          <div 
+            className="glass-panel" 
+            style={{
+              width: '100%',
+              maxWidth: '480px',
+              borderTopLeftRadius: '28px',
+              borderTopRightRadius: '28px',
+              backgroundColor: 'rgba(255, 255, 255, 0.96)',
+              padding: '22px 20px',
+              boxShadow: '0 -16px 40px rgba(0, 0, 0, 0.35)',
+              maxHeight: '75vh',
+              display: 'flex',
+              flexDirection: 'column',
+              animation: 'glassModalEnter 0.25s ease'
+            }}
+          >
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '12px',
+                  backgroundColor: 'rgba(2, 132, 199, 0.12)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <Eye size={19} color="#0284c7" />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '16px', fontWeight: '800', margin: 0, color: 'var(--text-primary)' }}>
+                    Viewed by {selectedStatusForViewers.views?.length || 0}
+                  </h3>
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '2px 0 0 0' }}>
+                    Contacts who viewed this status update
+                  </p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => {
+                  setShowViewersModal(false);
+                  setIsPaused(false);
+                }}
+                className="glass-btn"
+                style={{ width: '32px', height: '32px', borderRadius: '50%' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Viewer List */}
+            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {(!selectedStatusForViewers.views || selectedStatusForViewers.views.length === 0) ? (
+                <div style={{
+                  textAlign: 'center',
+                  padding: '36px 16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: '8px',
+                  color: 'var(--text-secondary)'
+                }}>
+                  <Eye size={36} color="#94a3b8" />
+                  <p style={{ fontSize: '14px', fontWeight: '700', margin: 0, color: 'var(--text-primary)' }}>No views yet</p>
+                  <span style={{ fontSize: '12px' }}>When someone views your status update, they will appear here.</span>
+                </div>
+              ) : (
+                selectedStatusForViewers.views.map((viewer, index) => (
+                  <div 
+                    key={viewer.userId || index}
+                    className="glass-card"
+                    style={{
+                      padding: '10px 14px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      borderRadius: '16px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <img 
+                        src={viewer.userAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80'} 
+                        alt={viewer.userName}
+                        style={{ width: '42px', height: '42px', borderRadius: '50%', objectFit: 'cover' }}
+                      />
+                      <div>
+                        <h4 style={{ fontSize: '14px', fontWeight: '700', margin: 0, color: 'var(--text-primary)' }}>
+                          {viewer.userName}
+                        </h4>
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'block', marginTop: '2px' }}>
+                          {viewer.userPhone || 'Registered contact'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>
+                        <Clock size={12} />
+                        <span>{viewer.timestamp || 'Recently'}</span>
+                      </div>
+                      <CheckCheck size={15} color="#0284c7" />
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}

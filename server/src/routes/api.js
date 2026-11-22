@@ -516,14 +516,28 @@ router.delete('/contacts/:contactId', (req, res) => {
 // 🌟 WHATSAPP STATUS / STORIES ROUTES
 // ==========================================
 
-// Get all active statuses
+// Get all active statuses with enriched viewer list
 router.get('/status', (req, res) => {
   const enriched = statuses.map(st => {
     const user = users.find(u => u.id === st.userId);
+    const enrichedViews = (st.views || []).map(v => {
+      const viewerId = typeof v === 'string' ? v : v.userId;
+      const viewerUser = users.find(u => u.id === viewerId);
+      return {
+        userId: viewerId,
+        userName: viewerUser?.name || (typeof v === 'object' ? v.userName : 'Contact'),
+        userAvatar: viewerUser?.avatar || (typeof v === 'object' ? v.userAvatar : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80'),
+        userPhone: viewerUser?.phone || (typeof v === 'object' ? v.userPhone : ''),
+        timestamp: (typeof v === 'object' && v.timestamp) ? v.timestamp : 'Recently',
+        viewedAt: (typeof v === 'object' && v.viewedAt) ? v.viewedAt : (st.createdAt || new Date().toISOString())
+      };
+    });
+
     return {
       ...st,
       userName: user?.name || st.userName || 'User',
-      userAvatar: user?.avatar || st.userAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'
+      userAvatar: user?.avatar || st.userAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+      views: enrichedViews
     };
   });
   res.json(enriched);
@@ -556,19 +570,36 @@ router.post('/status', (req, res) => {
   res.status(201).json(newStatus);
 });
 
-// Record a view on a status
+// Record a view on a status with full viewer profile and timestamp
 router.post('/status/:id/view', (req, res) => {
   const { id } = req.params;
   const { userId } = req.body;
   const st = statuses.find(s => s.id === id);
   if (st && userId) {
     st.views = st.views || [];
-    if (!st.views.includes(userId)) {
-      st.views.push(userId);
+    const alreadyViewed = st.views.some(v => (typeof v === 'string' ? v : v.userId) === userId);
+    if (!alreadyViewed) {
+      const viewer = users.find(u => u.id === userId);
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const viewRecord = {
+        userId,
+        userName: viewer?.name || 'Contact',
+        userAvatar: viewer?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80',
+        userPhone: viewer?.phone || '',
+        timestamp: `Today at ${timeStr}`,
+        viewedAt: new Date().toISOString()
+      };
+      st.views.push(viewRecord);
       saveDatabase();
+
+      // Real-time broadcast so status owner sees new viewer instantly
+      req.io?.emit('status-viewed', {
+        statusId: id,
+        view: viewRecord
+      });
     }
   }
-  res.json({ success: true });
+  res.json({ success: true, views: st ? st.views : [] });
 });
 
 // Delete a status
