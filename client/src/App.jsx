@@ -19,7 +19,22 @@ import AppUpdateModal from './components/AppUpdateModal';
 import { Smartphone, Monitor } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 
-const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.2.0';
+export const APP_VERSION_CODE = 120;
+
+// Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
+function isVersionGreater(remoteVer, currentVer) {
+  if (!remoteVer || !currentVer) return false;
+  const rParts = String(remoteVer).split('.').map(n => parseInt(n, 10) || 0);
+  const cParts = String(currentVer).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(rParts.length, cParts.length); i++) {
+    const r = rParts[i] || 0;
+    const c = cParts[i] || 0;
+    if (r > c) return true;
+    if (r < c) return false;
+  }
+  return false;
+}
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -181,8 +196,10 @@ export default function App() {
       const res = await fetch('/api/app-version');
       const data = await res.json();
       if (data && data.latestVersion) {
-        const isNewer = data.latestVersion !== APP_VERSION;
-        const dismissed = sessionStorage.getItem('glasschat_update_dismissed') === data.latestVersion;
+        // ONLY considered newer if remote versionCode > local versionCode OR semver remote > local
+        const isNewer = (data.versionCode && data.versionCode > APP_VERSION_CODE) || 
+                        isVersionGreater(data.latestVersion, APP_VERSION);
+        const dismissed = localStorage.getItem('glasschat_update_dismissed') === data.latestVersion;
         if (isNewer && (!dismissed || manual)) {
           setUpdateInfo(data);
         } else if (manual) {
@@ -1161,7 +1178,7 @@ export default function App() {
             updateInfo={updateInfo}
             currentVersion={APP_VERSION}
             onClose={() => {
-              sessionStorage.setItem('glasschat_update_dismissed', updateInfo.latestVersion);
+              localStorage.setItem('glasschat_update_dismissed', updateInfo.latestVersion);
               setUpdateInfo(null);
             }}
           />
