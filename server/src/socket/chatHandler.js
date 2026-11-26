@@ -25,7 +25,8 @@ export function setupChatHandlers(io, socket, userSocketMap) {
     mediaUrl, 
     type = 'text',
     encrypted = true,
-    recipientId = null
+    recipientId = null,
+    isUrgent = false
   }) => {
     // 🛡️ SECURITY: Identity verification (Anti-Impersonation)
     if (socket.userId && senderId && socket.userId !== senderId) {
@@ -59,6 +60,7 @@ export function setupChatHandlers(io, socket, userSocketMap) {
       type,
       encrypted,
       recipientId,
+      isUrgent: Boolean(isUrgent),
       timestamp: formatISTTime(now),
       createdAt: now.toISOString(),
       rawTime: now.getTime(),

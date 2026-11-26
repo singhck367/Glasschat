@@ -4,7 +4,7 @@ import {
   Smile, CheckCheck, Check, MoreVertical, Image, Users, Lock, 
   Mic, MicOff, Play, Pause, Trash2, X, Download,
   FileText, Camera, Headphones, User, BarChart2, Calendar, SmilePlus, Plus,
-  PhoneMissed, Search, Copy
+  PhoneMissed, Search, Copy, Languages, Zap
 } from 'lucide-react';
 import SecurityVerificationModal from './SecurityVerificationModal';
 import UserProfileModal from './UserProfileModal';
@@ -39,6 +39,8 @@ export default function ChatRoom({
   const [activeMessageMenu, setActiveMessageMenu] = useState(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isUrgentMode, setIsUrgentMode] = useState(false);
+  const [translatedMessages, setTranslatedMessages] = useState({});
 
   // Saved contact name resolution
   const cleanPhoneDigits = (chat.phone || '').replace(/\D/g, '');
@@ -197,6 +199,9 @@ export default function ChatRoom({
         // If message is from someone else, play sound chime and mark as seen immediately
         if (payload.message.senderId !== currentUser.id) {
           playNotificationSound();
+          if (payload.message.isUrgent && typeof navigator !== 'undefined' && navigator.vibrate) {
+            try { navigator.vibrate([300, 150, 300, 150, 400]); } catch (e) {}
+          }
           socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
         }
 
@@ -347,8 +352,9 @@ export default function ChatRoom({
       senderPhone: currentUser.phone || '',
       senderAvatar: currentUser.avatar || '',
       timestamp: timeStr,
-      status: 'delivered',
+      status: chat.online ? 'delivered' : 'sent',
       encrypted: true,
+      isUrgent: isUrgentMode,
       ...msgData
     };
 
@@ -363,8 +369,38 @@ export default function ChatRoom({
       senderAvatar: currentUser.avatar || '',
       encrypted: true,
       recipientId: isGroup ? null : chat.id,
+      isUrgent: isUrgentMode,
       ...msgData
     });
+
+    if (isUrgentMode) setIsUrgentMode(false);
+  };
+
+  // Instant In-Chat AI Translator (Hindi <-> English)
+  const handleTranslateMessage = async (msgId, text) => {
+    if (translatedMessages[msgId]) {
+      setTranslatedMessages(prev => {
+        const next = { ...prev };
+        delete next[msgId];
+        return next;
+      });
+      setActiveMessageMenu(null);
+      return;
+    }
+    const hasDevanagari = /[\u0900-\u097F]/.test(text || '');
+    const targetLang = hasDevanagari ? 'en' : 'hi';
+    try {
+      const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`);
+      const data = await res.json();
+      const translated = data[0].map(item => item[0]).join('');
+      setTranslatedMessages(prev => ({
+        ...prev,
+        [msgId]: { text: translated, lang: targetLang === 'hi' ? 'Hindi' : 'English' }
+      }));
+    } catch (e) {
+      console.warn('Translation failed:', e);
+    }
+    setActiveMessageMenu(null);
   };
 
   // Handle Send Text Message
@@ -1130,6 +1166,26 @@ export default function ChatRoom({
                         {emoji}
                       </button>
                     ))}
+                    {msg.text && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTranslateMessage(msg.id, msg.text);
+                        }}
+                        title="Translate (Hindi ↔ English)"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#0284c7',
+                          cursor: 'pointer',
+                          padding: '2px 4px',
+                          display: 'flex',
+                          alignItems: 'center'
+                        }}
+                      >
+                        <Languages size={15} />
+                      </button>
+                    )}
                     {isMe && (
                       <button
                         onClick={(e) => {
@@ -1160,11 +1216,29 @@ export default function ChatRoom({
                     maxWidth: '82%',
                     padding: isAudio ? '8px 12px' : '10px 14px',
                     borderRadius: isMe ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
-                    boxShadow: 'var(--glass-shadow-sm)',
+                    boxShadow: msg.isUrgent ? '0 0 14px rgba(239, 68, 68, 0.45)' : 'var(--glass-shadow-sm)',
+                    border: msg.isUrgent ? '1.5px solid #ef4444' : undefined,
                     position: 'relative',
                     cursor: 'pointer'
                   }}
                 >
+                {/* Urgent Priority Alert Badge */}
+                {msg.isUrgent && (
+                  <div style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '2px 7px',
+                    borderRadius: '6px',
+                    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                    color: '#ef4444',
+                    fontSize: '10px',
+                    fontWeight: '800',
+                    marginBottom: '4px'
+                  }}>
+                    <Zap size={11} fill="#ef4444" /> URGENT BUZZ
+                  </div>
+                )}
                 {/* Group sender tag */}
                 {isGroup && !isMe && (
                   <span style={{
@@ -1559,13 +1633,35 @@ export default function ChatRoom({
                   <p style={{
                     fontSize: '14px',
                     lineHeight: '1.45',
-                    color: 'var(--text-primary)',
+                    color: !isMe ? 'var(--text-primary)' : (
+                      msg.status === 'seen' || msg.status === 'read' ? '#0284c7' :
+                      msg.status === 'delivered' ? '#059669' : '#ef4444'
+                    ),
+                    fontWeight: isMe ? '500' : '400',
                     margin: 0,
                     wordBreak: 'break-word',
                     padding: msg.type === 'image' ? '2px 6px' : '0'
                   }}>
                     {msg.text}
                   </p>
+                )}
+
+                {/* Inline Instant Translation Result */}
+                {translatedMessages[msg.id] && (
+                  <div style={{
+                    marginTop: '5px',
+                    padding: '5px 8px',
+                    borderRadius: '8px',
+                    backgroundColor: isMe ? 'rgba(255, 255, 255, 0.25)' : 'rgba(2, 132, 199, 0.08)',
+                    borderLeft: '3px solid #0284c7',
+                    fontSize: '13px',
+                    color: 'var(--text-primary)'
+                  }}>
+                    <div style={{ fontSize: '10px', fontWeight: '800', color: '#0284c7', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+                      <Languages size={11} /> Translated ({translatedMessages[msg.id].lang}):
+                    </div>
+                    {translatedMessages[msg.id].text}
+                  </div>
                 )}
 
                 {/* Timestamp & Status Ticks */}
@@ -1583,11 +1679,11 @@ export default function ChatRoom({
                   {isMe && (
                     <span style={{ display: 'flex', alignItems: 'center', marginLeft: '2px' }}>
                       {msg.status === 'seen' || msg.status === 'read' ? (
-                        <CheckCheck size={15} color="#34B7F1" title="Seen" />
+                        <CheckCheck size={15} color="#34B7F1" title="Seen (Blue Double Tick)" />
                       ) : msg.status === 'delivered' ? (
-                        <CheckCheck size={15} color="#8696a0" title="Delivered (Data On)" />
+                        <CheckCheck size={15} color="#10b981" title="Delivered (Green Double Tick - Data ON)" />
                       ) : (
-                        <Check size={14} color="#8696a0" title="Sent to server" />
+                        <Check size={14} color="#ef4444" title="Sent only (Red Single Tick - recipient offline/data off)" />
                       )}
                     </span>
                   )}
@@ -1795,6 +1891,24 @@ export default function ChatRoom({
               <Paperclip size={18} color={showAttachmentMenu ? '#0284c7' : 'var(--text-secondary)'} />
             </button>
 
+            {/* Emergency Buzz Toggle Button */}
+            <button
+              type="button"
+              onClick={() => setIsUrgentMode(prev => !prev)}
+              className="glass-btn" 
+              style={{
+                width: '32px',
+                height: '32px',
+                flexShrink: 0,
+                padding: 0,
+                backgroundColor: isUrgentMode ? 'rgba(239, 68, 68, 0.18)' : undefined,
+                borderColor: isUrgentMode ? '#ef4444' : undefined
+              }}
+              title={isUrgentMode ? "Emergency Priority Alert ON (Recipient will receive loud vibrating alert)" : "Send as Urgent Priority Alert"}
+            >
+              <Zap size={16} color={isUrgentMode ? '#ef4444' : 'var(--text-secondary)'} fill={isUrgentMode ? '#ef4444' : 'none'} />
+            </button>
+
             <form onSubmit={handleSendMessage} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '4px' }}>
               <input
                 type="text"
@@ -1807,7 +1921,7 @@ export default function ChatRoom({
                   }
                   e.target.scrollIntoView({ block: 'nearest' });
                 }}
-                placeholder="Message..."
+                placeholder={isUrgentMode ? "🚨 Send urgent priority buzz..." : "Message..."}
                 className="glass-input"
                 style={{
                   flex: 1,

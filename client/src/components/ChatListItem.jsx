@@ -116,7 +116,15 @@ export default function ChatListItem({
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', minWidth: 0, flex: 1 }}>
-            <CheckCheck size={14} color="#0284c7" />
+            {chat.lastMessageSenderId === currentUser?.id && (
+              chat.lastMessageStatus === 'seen' || chat.lastMessageStatus === 'read' ? (
+                <CheckCheck size={14} color="#34B7F1" />
+              ) : chat.lastMessageStatus === 'delivered' ? (
+                <CheckCheck size={14} color="#10b981" />
+              ) : (
+                <Check size={13} color="#ef4444" />
+              )
+            )}
             <p style={{
               fontSize: '13px',
               color: chat.unreadCount > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',

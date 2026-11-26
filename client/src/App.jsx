@@ -848,6 +848,8 @@ export default function App() {
           phone: c.phone || summary?.senderPhone || '',
           isGroup: false,
           lastMessage: summary?.lastMessage || 'Tap to chat',
+          lastMessageStatus: summary?.status,
+          lastMessageSenderId: summary?.senderId,
           timestamp: summary?.timestamp || (c.online ? 'Online' : 'Available'),
           rawTime: summary?.rawTime || 0,
           unreadCount: unread
