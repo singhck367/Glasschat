@@ -126,7 +126,7 @@ app.get('/ios-manifest.plist', (req, res) => {
                 <key>bundle-identifier</key>
                 <string>com.glasschat.app</string>
                 <key>bundle-version</key>
-                <string>1.3.1</string>
+                <string>1.3.2</string>
                 <key>kind</key>
                 <string>software</string>
                 <key>title</key>
@@ -138,6 +138,90 @@ app.get('/ios-manifest.plist', (req, res) => {
 </plist>`;
   res.set('Content-Type', 'text/xml');
   res.send(plist);
+});
+
+// One-click Apple iOS WebClip Configuration Profile (.mobileconfig)
+// Installs GlassChat with custom 3D icon directly onto iPhone Home Screen (no Apple Developer account required)
+app.get('/ios-install.mobileconfig', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  const appUrl = `${protocol}://${host}/`;
+
+  // Read apple-touch-icon.png as base64 for iPhone Home Screen icon
+  let iconBase64 = '';
+  const iconCandidates = [
+    path.resolve(__dirname, '../public/apple-touch-icon.png'),
+    path.resolve(__dirname, '../../client/public/apple-touch-icon.png')
+  ];
+  for (const candidate of iconCandidates) {
+    if (fs.existsSync(candidate)) {
+      iconBase64 = fs.readFileSync(candidate).toString('base64');
+      break;
+    }
+  }
+
+  const iconXml = iconBase64
+    ? `            <key>Icon</key>\n            <data>${iconBase64}</data>`
+    : '';
+
+  const mobileconfig = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>FullScreen</key>
+            <true/>
+            <key>IgnoreManifestScope</key>
+            <false/>
+            <key>IsRemovable</key>
+            <true/>
+            <key>Label</key>
+            <string>GlassChat</string>
+            <key>PayloadDescription</key>
+            <string>Installs GlassChat Web App on iPhone Home Screen</string>
+            <key>PayloadDisplayName</key>
+            <string>GlassChat App</string>
+            <key>PayloadIdentifier</key>
+            <string>com.glasschat.app.webclip</string>
+            <key>PayloadType</key>
+            <string>com.apple.webClip.managed</string>
+            <key>PayloadUUID</key>
+            <string>B7A4F2C1-8D3E-4A91-9E2B-112233445566</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>Precomposed</key>
+            <true/>
+            <key>URL</key>
+            <string>${appUrl}</string>
+${iconXml}
+        </dict>
+    </array>
+    <key>PayloadDescription</key>
+    <string>Tap Install to add GlassChat with full-screen HD calling and 3D icon to your iPhone Home Screen.</string>
+    <key>PayloadDisplayName</key>
+    <string>GlassChat for iPhone</string>
+    <key>PayloadIdentifier</key>
+    <string>com.glasschat.app.profile</string>
+    <key>PayloadOrganization</key>
+    <string>GlassChat Messenger</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>A1B2C3D4-E5F6-4789-ABCD-EF0123456789</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>`;
+
+  res.set({
+    'Content-Type': 'application/x-apple-aspen-config; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="GlassChat.mobileconfig"'
+  });
+  res.send(mobileconfig);
 });
 
 // API Routes
@@ -163,7 +247,7 @@ const activeStaticPath = fs.existsSync(path.join(clientDistPath, 'index.html'))
 if (activeStaticPath) {
   app.use(express.static(activeStaticPath));
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/download-ipa' || req.path === '/ios-manifest.plist' || req.path === '/health' || req.path.startsWith('/socket.io')) {
+    if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/download-ipa' || req.path === '/ios-manifest.plist' || req.path === '/ios-install.mobileconfig' || req.path === '/health' || req.path.startsWith('/socket.io')) {
       return next();
     }
     res.sendFile(path.join(activeStaticPath, 'index.html'));

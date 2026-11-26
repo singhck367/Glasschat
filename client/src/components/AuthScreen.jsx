@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Smartphone, ShieldCheck, ArrowRight, ArrowLeft, 
   Sparkles, Camera, Check, User, MessageSquareCode, KeyRound,
-  Globe, Settings, RefreshCw, X
+  Globe, Settings, RefreshCw, X, Download
 } from 'lucide-react';
 import { 
   sendFirebasePhoneOtp, 
@@ -11,7 +11,7 @@ import {
 } from '../services/firebase.js';
 import { getServerBaseUrl, setServerBaseUrl, SERVER_URL } from '../services/config.js';
 
-export default function AuthScreen({ onLoginSuccess }) {
+export default function AuthScreen({ onLoginSuccess, onOpenInstall }) {
   const [step, setStep] = useState(1); // 1: Phone, 2: OTP, 3: Profile Setup, 4: Two-Step Verification
   const [countryCode, setCountryCode] = useState('+91');
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -484,7 +484,32 @@ export default function AuthScreen({ onLoginSuccess }) {
                 {loading ? 'Sending OTP...' : 'Next'} <ArrowRight size={16} />
               </button>
 
-              <div style={{ display: 'flex', justifyContent: 'center', marginTop: '6px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+                {onOpenInstall && !(window.Capacitor?.isNativePlatform?.() || window.navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)')?.matches) && (
+                  <button
+                    type="button"
+                    onClick={onOpenInstall}
+                    className="glass-btn"
+                    style={{
+                      width: '100%',
+                      height: '38px',
+                      borderRadius: '14px',
+                      backgroundColor: 'rgba(2, 132, 199, 0.1)',
+                      border: '1px solid rgba(2, 132, 199, 0.3)',
+                      color: '#0284c7',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Download size={14} />
+                    <span>Install GlassChat App (Android & iPhone)</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => {

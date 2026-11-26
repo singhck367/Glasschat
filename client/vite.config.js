@@ -26,6 +26,10 @@ export default defineConfig({
         target: 'http://localhost:5000',
         changeOrigin: true
       },
+      '/ios-install.mobileconfig': {
+        target: 'http://localhost:5000',
+        changeOrigin: true
+      },
       '/health': {
         target: 'http://localhost:5000',
         changeOrigin: true

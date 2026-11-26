@@ -20,8 +20,8 @@ import { Smartphone, Monitor } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { formatISTTime } from './utils/time';
 
-export const APP_VERSION = '1.3.1';
-export const APP_VERSION_CODE = 131;
+export const APP_VERSION = '1.3.2';
+export const APP_VERSION_CODE = 132;
 
 // Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
 function isVersionGreater(remoteVer, currentVer) {
@@ -299,8 +299,13 @@ export default function App() {
       }
     }
 
-    // Check for in-app updates on startup
-    checkForAppUpdates(false);
+    // Check for in-app updates or direct /download /install route on startup
+    const path = window.location.pathname.toLowerCase();
+    if (path === '/download' || path === '/install') {
+      checkForAppUpdates(true);
+    } else {
+      checkForAppUpdates(false);
+    }
 
     return () => window.removeEventListener('hashchange', handleHash);
   }, []);
@@ -1058,7 +1063,7 @@ export default function App() {
 
         {/* Auth / Login Screen (If user not logged in) */}
         {!currentUser ? (
-          <AuthScreen onLoginSuccess={handleLoginSuccess} />
+          <AuthScreen onLoginSuccess={handleLoginSuccess} onOpenInstall={() => checkForAppUpdates(true)} />
         ) : selectedChat ? (
           /* Active Chat Room View */
           <ChatRoom
@@ -1082,6 +1087,7 @@ export default function App() {
               onOpenNewChat={() => setIsNewChatOpen(true)}
               onOpenAdmin={() => setIsAdminOpen(true)}
               onOpenSettings={() => setActiveTab('settings')}
+              onOpenInstall={() => checkForAppUpdates(true)}
               activeTab={activeTab}
             />
 

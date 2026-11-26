@@ -1,5 +1,5 @@
 import React from 'react';
-import { Search, UserPlus, Sparkles, MessageSquarePlus } from 'lucide-react';
+import { Search, UserPlus, Sparkles, MessageSquarePlus, Download } from 'lucide-react';
 
 export default function NavigationHeader({ 
   currentUser, 
@@ -9,8 +9,13 @@ export default function NavigationHeader({
   onOpenNewChat,
   onOpenAdmin,
   onOpenSettings,
+  onOpenInstall,
   activeTab 
 }) {
+  const showInstallPill = typeof window !== 'undefined' && 
+    onOpenInstall &&
+    !window.Capacitor?.isNativePlatform?.() &&
+    !(window.navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)')?.matches);
   return (
     <header className="glass-panel" style={{
       padding: '12px 16px',
@@ -81,6 +86,29 @@ export default function NavigationHeader({
 
         {/* Action buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {showInstallPill && (
+            <button
+              onClick={onOpenInstall}
+              className="glass-btn"
+              style={{
+                height: '32px',
+                padding: '0 10px',
+                borderRadius: '12px',
+                backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                borderColor: '#10b981',
+                color: '#059669',
+                fontSize: '11px',
+                fontWeight: '800',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px'
+              }}
+              title="Install GlassChat App"
+            >
+              <Download size={13} />
+              <span>Install</span>
+            </button>
+          )}
           {/* New Chat / Contacts Directory */}
           <button 
             onClick={onOpenNewChat}

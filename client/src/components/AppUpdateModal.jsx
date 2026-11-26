@@ -29,6 +29,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
   const [errorMsg, setErrorMsg] = useState('');
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [showDeveloperIpa, setShowDeveloperIpa] = useState(false);
+  const [iosProfileStarted, setIosProfileStarted] = useState(false);
   const [pwaPrompt, setPwaPrompt] = useState(() => (typeof window !== 'undefined' ? window.__pwaInstallPrompt : null));
   const downloadedBlobRef = useRef(null);
 
@@ -94,6 +95,12 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
     } catch {
       alert(`Open in Safari:\n${appWebUrl}`);
     }
+  };
+
+  const handleIosProfileInstall = () => {
+    setIosProfileStarted(true);
+    const configUrl = resolveDownloadUrl(updateInfo.iosMobileConfigUrl || '/ios-install.mobileconfig');
+    window.location.href = configUrl;
   };
 
   const handleStartApkDownload = async () => {
@@ -271,7 +278,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                     : (updateInfo.alreadyLatest ? 'UP TO DATE' : 'UPDATE AVAILABLE'))}
               </span>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: '700' }}>
-                v{updateInfo.latestVersion || '1.3.1'}
+                v{updateInfo.latestVersion || '1.3.2'}
               </span>
             </div>
             <h3 style={{ fontSize: '17px', fontWeight: '800', color: 'var(--text-primary)', margin: '4px 0 0 0' }}>
@@ -296,7 +303,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
         }}>
           <span style={{ color: 'var(--text-secondary)' }}>Installed: <strong>v{currentVersion}</strong></span>
           <span style={{ color: '#0284c7', fontWeight: '800' }}>
-            {isIOS ? 'iOS Web App / PWA' : `GlassChat.apk (v${updateInfo.latestVersion || '1.3.1'})`}
+            {isIOS ? 'iOS Web App / Profile' : `GlassChat.apk (v${updateInfo.latestVersion || '1.3.2'})`}
           </span>
         </div>
 
@@ -370,15 +377,33 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 )}
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', color: 'var(--text-primary)' }}>
-                  <div><strong>Step 1:</strong> Safari browser mein <code>{appWebUrl}</code> kholein.</div>
+                  <div><strong>Method A (1-Click Install Button):</strong> Niche <strong>"Install on iPhone"</strong> button dabaye ➔ <strong>Allow</strong> tap karein ➔ iPhone <strong>Settings ➔ Profile Downloaded ➔ Install</strong> par tap karein!</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                    <strong>Step 2:</strong> Niche Safari ke <strong>Share</strong> icon (<Share size={13} style={{ display: 'inline', verticalAlign: 'middle' }} />) par tap karein.
+                    <strong>Method B (Safari):</strong> Safari ke <strong>Share</strong> icon (<Share size={13} style={{ display: 'inline', verticalAlign: 'middle' }} />) par tap karein ➔ <strong>"Add to Home Screen" ➔ "Add"</strong>.
                   </div>
-                  <div><strong>Step 3:</strong> Scroll karke <strong>"Add to Home Screen" ➔ "Add"</strong> tap karein.</div>
                 </div>
 
+                {iosProfileStarted && (
+                  <div style={{
+                    marginTop: '10px',
+                    padding: '10px',
+                    borderRadius: '12px',
+                    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                    border: '1px solid rgba(16, 185, 129, 0.35)',
+                    color: '#065f46',
+                    fontSize: '11px',
+                    fontWeight: '700',
+                    lineHeight: '1.4'
+                  }}>
+                    ✅ Profile download trigger ho gaya hai!<br />
+                    1. Popup me <strong>"Allow"</strong> tap karein.<br />
+                    2. iPhone ki <strong>Settings</strong> app kholein.<br />
+                    3. Top par <strong>"Profile Downloaded" ➔ "Install"</strong> tap karte hi GlassChat icon Home Screen par aa jayega!
+                  </div>
+                )}
+
                 <p style={{ fontSize: '11px', color: '#0369a1', margin: '8px 0 10px 0', fontWeight: '600' }}>
-                  ✅ Isse GlassChat icon ke saath Home Screen par install ho jayegi, bina Apple certificate error ke aur har update automatic milega!
+                  ✅ Dono tarikon se app bina Apple Developer fee ke full-screen chalegi aur har update automatic milega!
                 </p>
 
                 <button
@@ -473,10 +498,10 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 lineHeight: '1.4',
                 color: '#065f46'
               }}>
-                <strong>🛡️ Android Clean Update (v{updateInfo.latestVersion || '1.3.1'}):</strong><br />
-                1. Sabhi Play Protect warning triggers (<code>REQUEST_INSTALL_PACKAGES</code>) hata diye gaye hain.<br />
-                2. Agar phone me purana debug build hai, to conflict se bachne ke liye pehle purana app uninstall karke install karein.<br />
-                3. Sideload APK par agar Play Protect <strong>"Unknown developer"</strong> puche to <strong>More details ➔ Install anyway</strong> tap karein.
+                <strong>🛡️ Android Clean Update (v{updateInfo.latestVersion || '1.3.2'}):</strong><br />
+                1. Agar phone me purana debug build hai aur <strong>"package conflicts"</strong> error aaye, to pehle <strong>PURANA GlassChat UNINSTALL</strong> karke naya install karein (sirf 1 baar!).<br />
+                2. Isme Play Protect dropper flags hata diye gaye hain aur official v1+v2+v3 release key lagi hai.<br />
+                3. Sideload par Play Protect <strong>"Unknown developer"</strong> puche to <strong>More details ➔ Install anyway</strong> tap karein.
               </div>
             )}
 
@@ -645,6 +670,29 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 }}
               >
                 {isIOS ? 'Close' : 'Later'}
+              </button>
+            )}
+
+            {isIOS && !isStandalone && (
+              <button
+                onClick={handleIosProfileInstall}
+                className="glass-btn glass-btn-primary"
+                style={{
+                  flex: 2,
+                  height: '44px',
+                  borderRadius: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontWeight: '800',
+                  fontSize: '13px',
+                  background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+                  boxShadow: '0 8px 24px rgba(2, 132, 199, 0.35)'
+                }}
+              >
+                <Apple size={16} />
+                Install on iPhone
               </button>
             )}
 
