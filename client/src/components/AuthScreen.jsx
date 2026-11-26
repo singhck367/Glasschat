@@ -333,16 +333,18 @@ export default function AuthScreen({ onLoginSuccess }) {
             {/* Logo & Header */}
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', textAlign: 'center' }}>
               <div className="glow-active" style={{
-                width: '64px',
-                height: '64px',
+                width: '72px',
+                height: '72px',
                 borderRadius: '22px',
-                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.3) 0%, rgba(192, 132, 252, 0.3) 100%)',
+                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.2) 0%, rgba(192, 132, 252, 0.2) 100%)',
                 border: '2px solid rgba(255, 255, 255, 0.9)',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center'
+                justifyContent: 'center',
+                overflow: 'hidden',
+                boxShadow: '0 8px 24px rgba(2, 132, 199, 0.25)'
               }}>
-                <Smartphone size={32} color="#0284c7" />
+                <img src="/logo192.png" alt="GlassChat" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
 
               <h2 style={{

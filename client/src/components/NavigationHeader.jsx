@@ -54,7 +54,17 @@ export default function NavigationHeader({
               borderRadius: '50%'
             }} />
           </div>
-          <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <img 
+              src="/favicon.png" 
+              alt="Logo" 
+              style={{ 
+                width: '24px', 
+                height: '24px', 
+                borderRadius: '7px', 
+                boxShadow: '0 2px 8px rgba(2, 132, 199, 0.3)' 
+              }} 
+            />
             <h1 style={{ 
               fontSize: '22px', 
               fontWeight: '800', 
