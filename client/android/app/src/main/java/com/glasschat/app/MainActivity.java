@@ -1,6 +1,8 @@
 package com.glasschat.app;
 
 import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -11,6 +13,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.view.View;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -77,6 +80,9 @@ public class MainActivity extends BridgeActivity {
         public void setCallMode(boolean isVideo) {
             runOnUiThread(() -> {
                 try {
+                    // Prevent screen and CPU from sleeping during call (essential for Android < 12 and 5+ min calls)
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
                     AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                     if (audioManager != null) {
                         audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
@@ -103,10 +109,19 @@ public class MainActivity extends BridgeActivity {
                                 }
                             }
                         } else {
-                            if (audioManager.isBluetoothScoAvailableOffCall() || audioManager.isBluetoothA2dpOn()) {
-                                audioManager.startBluetoothSco();
-                                audioManager.setBluetoothScoOn(true);
-                                bluetoothActive = true;
+                            // Android < 12 compatibility fix: ONLY start Bluetooth SCO if a headset is actually connected!
+                            try {
+                                BluetoothAdapter btAdapter = BluetoothAdapter.getDefaultAdapter();
+                                if (btAdapter != null && btAdapter.isEnabled()) {
+                                    int headsetStatus = btAdapter.getProfileConnectionState(BluetoothProfile.HEADSET);
+                                    if (headsetStatus == BluetoothProfile.STATE_CONNECTED) {
+                                        audioManager.startBluetoothSco();
+                                        audioManager.setBluetoothScoOn(true);
+                                        bluetoothActive = true;
+                                    }
+                                }
+                            } catch (Exception btEx) {
+                                btEx.printStackTrace();
                             }
                         }
 
@@ -126,14 +141,19 @@ public class MainActivity extends BridgeActivity {
         public void endCallAudio() {
             runOnUiThread(() -> {
                 try {
+                    // Clear keep screen on flag when call ends
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
                     AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                     if (audioManager != null) {
                         audioManager.setSpeakerphoneOn(false);
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                             audioManager.clearCommunicationDevice();
                         } else {
-                            audioManager.stopBluetoothSco();
-                            audioManager.setBluetoothScoOn(false);
+                            try {
+                                audioManager.stopBluetoothSco();
+                                audioManager.setBluetoothScoOn(false);
+                            } catch (Exception ignored) {}
                         }
                         audioManager.setMode(AudioManager.MODE_NORMAL);
                     }
@@ -299,6 +319,12 @@ public class MainActivity extends BridgeActivity {
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
             settings.setDomStorageEnabled(true);
             settings.setDatabaseEnabled(true);
+            settings.setAllowFileAccess(true);
+            settings.setAllowContentAccess(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+            }
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
             // Register native AudioBridge into JavaScript window.AndroidAudio
             webView.addJavascriptInterface(new AudioBridge(), "AndroidAudio");

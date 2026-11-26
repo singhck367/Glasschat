@@ -68,6 +68,29 @@ export function setupCallHandlers(io, socket, userSocketMap) {
     }
   });
 
+  // Seamless ICE restart for call recovery & anti-freeze
+  socket.on('call-ice-restart', ({ to, signal }) => {
+    const targetSocketId = userSocketMap.get(to);
+    const destination = targetSocketId || to;
+    if (destination && signal) {
+      io.to(destination).emit('call-ice-restart', {
+        signal,
+        from: socket.userId
+      });
+    }
+  });
+
+  socket.on('call-ice-restart-answer', ({ to, signal }) => {
+    const targetSocketId = userSocketMap.get(to);
+    const destination = targetSocketId || to;
+    if (destination && signal) {
+      io.to(destination).emit('call-ice-restart-answer', {
+        signal,
+        from: socket.userId
+      });
+    }
+  });
+
   // End call
   socket.on('end-call', ({ to }) => {
     const targetSocketId = userSocketMap.get(to);

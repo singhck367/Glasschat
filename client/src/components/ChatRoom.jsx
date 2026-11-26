@@ -4,7 +4,7 @@ import {
   Smile, CheckCheck, Check, MoreVertical, Image, Users, Lock, 
   Mic, MicOff, Play, Pause, Trash2, X, Download,
   FileText, Camera, Headphones, User, BarChart2, Calendar, SmilePlus, Plus,
-  PhoneMissed
+  PhoneMissed, Search, Copy
 } from 'lucide-react';
 import SecurityVerificationModal from './SecurityVerificationModal';
 import UserProfileModal from './UserProfileModal';
@@ -37,6 +37,8 @@ export default function ChatRoom({
   const [showSecurityModal, setShowSecurityModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [activeMessageMenu, setActiveMessageMenu] = useState(null);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Saved contact name resolution
   const cleanPhoneDigits = (chat.phone || '').replace(/\D/g, '');
@@ -180,18 +182,22 @@ export default function ChatRoom({
       .then(res => res.json())
       .then(data => {
         setMessages(data || []);
+        // Automatically mark all incoming messages as seen upon entering chat
+        socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
       })
       .catch(err => console.error('Failed to load chat messages:', err));
 
-    // Join room
+    // Join room & emit seen
     socket.emit('join-chat', { chatId });
+    socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
 
     // Listen for new messages
     const handleNewMessage = (payload) => {
       if (payload.chatId === chatId) {
-        // If message is from someone else, play sound chime
+        // If message is from someone else, play sound chime and mark as seen immediately
         if (payload.message.senderId !== currentUser.id) {
           playNotificationSound();
+          socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
         }
 
         setMessages(prev => {
@@ -226,6 +232,33 @@ export default function ChatRoom({
       }
     };
 
+    // Listen for chat messages seen (ticks turn blue #34B7F1)
+    const handleChatMessagesSeen = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => 
+          m.senderId === currentUser.id ? { ...m, status: 'seen' } : m
+        ));
+      }
+    };
+
+    // Listen for messages delivered (single grey tick -> double grey tick)
+    const handleMessagesDelivered = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => 
+          (!payload.deliveredIds || payload.deliveredIds.includes(m.id)) && m.senderId === currentUser.id && m.status === 'sent'
+            ? { ...m, status: 'delivered' } 
+            : m
+        ));
+      }
+    };
+
+    // Listen for single message status update
+    const handleMessageStatusUpdated = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, status: payload.status } : m));
+      }
+    };
+
     // Listen for reaction updates
     const handleReactionUpdated = (payload) => {
       if (payload.chatId === chatId) {
@@ -249,6 +282,9 @@ export default function ChatRoom({
 
     socket.on('new-message', handleNewMessage);
     socket.on('user-typing', handleUserTyping);
+    socket.on('chat-messages-seen', handleChatMessagesSeen);
+    socket.on('messages-delivered', handleMessagesDelivered);
+    socket.on('message-status-updated', handleMessageStatusUpdated);
     socket.on('message-reaction-updated', handleReactionUpdated);
     socket.on('message-deleted', handleMessageDeleted);
     socket.on('poll-updated', handlePollUpdated);
@@ -257,6 +293,9 @@ export default function ChatRoom({
       socket.emit('leave-chat', { chatId });
       socket.off('new-message', handleNewMessage);
       socket.off('user-typing', handleUserTyping);
+      socket.off('chat-messages-seen', handleChatMessagesSeen);
+      socket.off('messages-delivered', handleMessagesDelivered);
+      socket.off('message-status-updated', handleMessageStatusUpdated);
       socket.off('message-reaction-updated', handleReactionUpdated);
       socket.off('message-deleted', handleMessageDeleted);
       socket.off('poll-updated', handlePollUpdated);
@@ -912,6 +951,22 @@ export default function ChatRoom({
         {/* Header Action Buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
           <button 
+            onClick={() => {
+              setIsSearchOpen(prev => !prev);
+              if (isSearchOpen) setSearchQuery('');
+            }}
+            className="glass-btn" 
+            style={{ 
+              width: '36px', 
+              height: '36px',
+              backgroundColor: isSearchOpen ? 'rgba(2, 132, 199, 0.12)' : undefined,
+              borderColor: isSearchOpen ? '#0284c7' : undefined
+            }}
+            title="Search Messages"
+          >
+            <Search size={17} color={isSearchOpen ? '#0284c7' : 'var(--text-secondary)'} />
+          </button>
+          <button 
             onClick={() => onStartCall(chat, false)}
             className="glass-btn" 
             style={{ width: '36px', height: '36px' }}
@@ -937,6 +992,45 @@ export default function ChatRoom({
           </button>
         </div>
       </header>
+
+      {/* IN-CHAT MESSAGE SEARCH BAR */}
+      {isSearchOpen && (
+        <div style={{
+          padding: '8px 16px',
+          backgroundColor: 'rgba(255, 255, 255, 0.98)',
+          borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
+          zIndex: 35
+        }}>
+          <Search size={16} color="var(--text-muted)" />
+          <input 
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search messages in chat..."
+            autoFocus
+            style={{
+              flex: 1,
+              border: 'none',
+              outline: 'none',
+              fontSize: '13px',
+              backgroundColor: 'transparent',
+              color: 'var(--text-primary)'
+            }}
+          />
+          {searchQuery && (
+            <button 
+              onClick={() => setSearchQuery('')}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex' }}
+            >
+              <X size={15} color="var(--text-muted)" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* CHAT MESSAGES THREAD */}
       <div 
@@ -969,29 +1063,108 @@ export default function ChatRoom({
           </span>
         </div>
 
-        {messages.map((msg, index) => {
-          const isMe = msg.senderId === currentUser.id;
-          const isAudio = msg.type === 'audio';
+        {(() => {
+          const displayedMessages = searchQuery.trim() 
+            ? messages.filter(m => (m.text || '').toLowerCase().includes(searchQuery.toLowerCase()))
+            : messages;
 
-          return (
-            <div 
-              key={msg.id || index}
-              style={{
-                display: 'flex',
-                justifyContent: isMe ? 'flex-end' : 'flex-start',
-                position: 'relative'
-              }}
-            >
+          if (displayedMessages.length === 0 && searchQuery.trim()) {
+            return (
+              <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: '13px' }}>
+                No messages found matching "<strong>{searchQuery}</strong>"
+              </div>
+            );
+          }
+
+          return displayedMessages.map((msg, index) => {
+            const isMe = msg.senderId === currentUser.id;
+            const isAudio = msg.type === 'audio';
+            const isMenuActive = activeMessageMenu === msg.id;
+
+            return (
               <div 
-                className={isMe ? 'message-bubble-outgoing' : 'message-bubble-incoming'}
+                key={msg.id || index}
                 style={{
-                  maxWidth: '82%',
-                  padding: isAudio ? '8px 12px' : '10px 14px',
-                  borderRadius: isMe ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
-                  boxShadow: 'var(--glass-shadow-sm)',
-                  position: 'relative'
+                  display: 'flex',
+                  justifyContent: isMe ? 'flex-end' : 'flex-start',
+                  position: 'relative',
+                  marginBottom: msg.reactions && Object.keys(msg.reactions).length > 0 ? '8px' : '0'
                 }}
               >
+                {/* WhatsApp Floating Reaction Bar on active message */}
+                {isMenuActive && (
+                  <div 
+                    className="glass-panel"
+                    style={{
+                      position: 'absolute',
+                      top: '-38px',
+                      right: isMe ? '4px' : 'auto',
+                      left: isMe ? 'auto' : '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '3px 8px',
+                      borderRadius: '20px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.98)',
+                      boxShadow: '0 4px 14px rgba(0, 0, 0, 0.15)',
+                      border: '1px solid rgba(0, 0, 0, 0.1)',
+                      zIndex: 30
+                    }}
+                  >
+                    {['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) => (
+                      <button
+                        key={emoji}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleReact(msg.id, emoji);
+                        }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          fontSize: '17px',
+                          cursor: 'pointer',
+                          padding: '1px 2px',
+                          lineHeight: 1
+                        }}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                    {isMe && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteMessage(msg.id);
+                        }}
+                        title="Delete message"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#ef4444',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          display: 'flex',
+                          alignItems: 'center'
+                        }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <div 
+                  onClick={() => setActiveMessageMenu(isMenuActive ? null : msg.id)}
+                  className={isMe ? 'message-bubble-outgoing' : 'message-bubble-incoming'}
+                  style={{
+                    maxWidth: '82%',
+                    padding: isAudio ? '8px 12px' : '10px 14px',
+                    borderRadius: isMe ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
+                    boxShadow: 'var(--glass-shadow-sm)',
+                    position: 'relative',
+                    cursor: 'pointer'
+                  }}
+                >
                 {/* Group sender tag */}
                 {isGroup && !isMe && (
                   <span style={{
@@ -1408,19 +1581,53 @@ export default function ChatRoom({
                     {(msg.rawTime || msg.createdAt) ? formatISTTime(msg.rawTime || msg.createdAt) : (msg.timestamp || 'Now')}
                   </span>
                   {isMe && (
-                    <span style={{ display: 'flex', alignItems: 'center' }}>
-                      {msg.status === 'read' ? (
-                        <CheckCheck size={14} color="#0284c7" />
+                    <span style={{ display: 'flex', alignItems: 'center', marginLeft: '2px' }}>
+                      {msg.status === 'seen' || msg.status === 'read' ? (
+                        <CheckCheck size={15} color="#34B7F1" title="Seen" />
+                      ) : msg.status === 'delivered' ? (
+                        <CheckCheck size={15} color="#8696a0" title="Delivered (Data On)" />
                       ) : (
-                        <Check size={13} color="var(--text-muted)" />
+                        <Check size={14} color="#8696a0" title="Sent to server" />
                       )}
                     </span>
                   )}
                 </div>
+
+                {/* Emoji Reactions Pill */}
+                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                  <div 
+                    style={{
+                      position: 'absolute',
+                      bottom: '-9px',
+                      right: isMe ? '8px' : 'auto',
+                      left: isMe ? 'auto' : '8px',
+                      padding: '1px 6px',
+                      borderRadius: '10px',
+                      fontSize: '11px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '2px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.96)',
+                      boxShadow: '0 2px 6px rgba(0, 0, 0, 0.12)',
+                      border: '1px solid rgba(0, 0, 0, 0.08)',
+                      zIndex: 10
+                    }}
+                  >
+                    {Array.from(new Set(Object.values(msg.reactions))).map((emoji, i) => (
+                      <span key={i}>{emoji}</span>
+                    ))}
+                    {Object.keys(msg.reactions).length > 1 && (
+                      <span style={{ fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)' }}>
+                        {Object.keys(msg.reactions).length}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           );
-        })}
+        });
+      })()}
 
         <div ref={messagesEndRef} />
       </div>

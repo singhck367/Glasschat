@@ -1,9 +1,12 @@
-// Google STUN + OpenRelay TURN servers for 100% NAT/CGNAT/Firewall traversal
+// Resilient Google + Twilio STUN & OpenRelay TURN servers for 100% NAT/CGNAT/Firewall traversal
 export const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:stun.services.mozilla.com' },
     {
       urls: [
@@ -14,13 +17,15 @@ export const ICE_SERVERS = {
       username: 'openrelayproject',
       credential: 'openrelayproject'
     }
-  ]
+  ],
+  iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require'
 };
 
 // Get local audio and/or video stream from device camera & microphone
 export async function getLocalUserMedia(video = true, audio = true, facingMode = 'user') {
-  // Clean standard constraints: compatible with Android HAL, iOS WebKit, and Desktop Chrome
-  // Avoid deprecated non-standard goog* flags which cause dual-AEC conflicts and audio mute on mobile
+  // Mobile-optimized constraints (ideal 480p, max 720p, 24-30fps): prevents Android CPU throttling & video freeze after 5+ mins
   const constraints = {
     audio: audio ? {
       echoCancellation: true,
@@ -28,8 +33,9 @@ export async function getLocalUserMedia(video = true, audio = true, facingMode =
       autoGainControl: true
     } : false,
     video: video ? {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
+      width: { ideal: 640, max: 1280 },
+      height: { ideal: 480, max: 720 },
+      frameRate: { ideal: 24, max: 30 },
       facingMode: { ideal: facingMode }
     } : false
   };

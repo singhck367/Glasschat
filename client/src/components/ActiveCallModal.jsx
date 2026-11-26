@@ -76,8 +76,36 @@ export default function ActiveCallModal({
       }
     } catch (e) {}
 
+    // Acquire Screen Wake Lock to prevent screen sleep / CPU throttling during 5+ min calls
+    let wakeLockSentinel = null;
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+      navigator.wakeLock.request('screen').then(wl => {
+        wakeLockSentinel = wl;
+      }).catch(() => {});
+    }
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcRef.current = pc;
+
+    // Carrier NAT Keep-Alive: WebRTC DataChannel ping every 10s prevents mobile network timeouts
+    let pingInterval = null;
+    let keepAliveChannel = null;
+    try {
+      keepAliveChannel = pc.createDataChannel('keepalive', { ordered: false, maxRetransmits: 0 });
+      keepAliveChannel.onopen = () => {
+        pingInterval = setInterval(() => {
+          if (keepAliveChannel && keepAliveChannel.readyState === 'open') {
+            keepAliveChannel.send('ping');
+          }
+        }, 10000);
+      };
+    } catch (e) {}
+
+    pc.ondatachannel = (e) => {
+      if (e.channel && e.channel.label === 'keepalive') {
+        e.channel.onmessage = () => {};
+      }
+    };
 
     // Drain queued ICE candidates once remote description is set
     const drainCandidateQueue = async () => {
@@ -110,6 +138,17 @@ export default function ActiveCallModal({
       stream.getTracks().forEach(t => {
         t.enabled = true;
       });
+
+      // Explicit onunmute listener guarantees playback if network stutter unblocks
+      event.track.onunmute = () => {
+        console.log('[WebRTC] Remote track unmuted:', event.track.kind);
+        if (remoteVideoRef.current && remoteStreamRef.current) {
+          remoteVideoRef.current.play().catch(e => console.log('Video play on unmute:', e));
+        }
+        if (remoteAudioRef.current && remoteStreamRef.current) {
+          remoteAudioRef.current.play().catch(e => console.log('Audio play on unmute:', e));
+        }
+      };
 
       // 1. Video element stream binding (Muted to eliminate duplicate echo)
       if (remoteVideoRef.current) {
@@ -169,13 +208,45 @@ export default function ActiveCallModal({
       }
     };
 
-    // Connection state monitor
+    // Connection & ICE state monitors with automatic ICE restart recovery
+    pc.oniceconnectionstatechange = () => {
+      console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        if (isMounted) setCallStatus('Connected');
+      } else if (pc.iceConnectionState === 'disconnected') {
+        if (isMounted) setCallStatus('Reconnecting...');
+        // Auto-recover after 2s if still disconnected
+        setTimeout(async () => {
+          if (isMounted && pc.iceConnectionState === 'disconnected' && session.isInitiator) {
+            try {
+              console.log('[WebRTC] Initiating ICE restart for recovery');
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              socket.emit('call-ice-restart', {
+                to: session.targetId,
+                signal: offer
+              });
+            } catch (err) {
+              console.warn('[WebRTC] ICE restart failed:', err);
+            }
+          }
+        }, 2000);
+      } else if (pc.iceConnectionState === 'failed') {
+        if (isMounted) setCallStatus('Reconnecting...');
+        if (session.isInitiator && pc.restartIce) {
+          pc.createOffer({ iceRestart: true }).then(offer => pc.setLocalDescription(offer)).then(() => {
+            socket.emit('call-ice-restart', { to: session.targetId, signal: pc.localDescription });
+          }).catch(() => {});
+        }
+      }
+    };
+
     pc.onconnectionstatechange = () => {
       console.log('[WebRTC] Connection state:', pc.connectionState);
       if (pc.connectionState === 'connected' && isMounted) {
         setCallStatus('Connected');
-      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        if (isMounted) setCallStatus('Disconnected');
+      } else if (pc.connectionState === 'failed') {
+        if (isMounted) setCallStatus('Reconnecting...');
       }
     };
 
@@ -320,19 +391,61 @@ export default function ActiveCallModal({
       }
     };
 
+    const handleIceRestart = async (data) => {
+      if (data.signal && pcRef.current) {
+        try {
+          console.log('[WebRTC] Received peer ICE restart signal, answering...');
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.signal));
+          const answer = await pcRef.current.createAnswer();
+          await pcRef.current.setLocalDescription(answer);
+          socket.emit('call-ice-restart-answer', {
+            to: session.targetId,
+            signal: answer
+          });
+          if (isMounted) setCallStatus('Connected');
+        } catch (e) {
+          console.warn('[WebRTC] ICE restart answer handling error:', e);
+        }
+      }
+    };
+
+    const handleIceRestartAnswer = async (data) => {
+      if (data.signal && pcRef.current) {
+        try {
+          console.log('[WebRTC] Received peer ICE restart answer, completing handshake');
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.signal));
+          if (isMounted) setCallStatus('Connected');
+        } catch (e) {
+          console.warn('[WebRTC] ICE restart answer set error:', e);
+        }
+      }
+    };
+
     socket.on('call-accepted', handleCallAccepted);
     socket.on('ice-candidate', handleIceCandidate);
     socket.on('call-ended', handleCallEnded);
     socket.on('call-rejected', handleCallRejected);
     socket.on('call-failed', handleCallFailed);
+    socket.on('call-ice-restart', handleIceRestart);
+    socket.on('call-ice-restart-answer', handleIceRestartAnswer);
 
     return () => {
       isMounted = false;
+      if (pingInterval) clearInterval(pingInterval);
+      if (keepAliveChannel) {
+        try { keepAliveChannel.close(); } catch (e) {}
+      }
+      if (wakeLockSentinel) {
+        try { wakeLockSentinel.release(); } catch (e) {}
+      }
+
       socket.off('call-accepted', handleCallAccepted);
       socket.off('ice-candidate', handleIceCandidate);
       socket.off('call-ended', handleCallEnded);
       socket.off('call-rejected', handleCallRejected);
       socket.off('call-failed', handleCallFailed);
+      socket.off('call-ice-restart', handleIceRestart);
+      socket.off('call-ice-restart-answer', handleIceRestartAnswer);
 
       stopMediaStream(localStreamRef.current);
       stopMediaStream(remoteStreamRef.current);

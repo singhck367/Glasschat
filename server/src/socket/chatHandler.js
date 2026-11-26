@@ -42,6 +42,10 @@ export function setupChatHandlers(io, socket, userSocketMap) {
     const senderAvatar = senderUser?.avatar || '';
     const resolvedSenderName = senderUser?.name || senderName;
 
+    // Determine real-time delivery status: 'delivered' (recipient online) vs 'sent' (recipient offline)
+    const isRecipientOnline = recipientId ? userSocketMap.has(recipientId) : false;
+    const initialStatus = isRecipientOnline ? 'delivered' : 'sent';
+
     const now = new Date();
     const newMessage = {
       id: uuidv4(),
@@ -54,10 +58,11 @@ export function setupChatHandlers(io, socket, userSocketMap) {
       mediaUrl,
       type,
       encrypted,
+      recipientId,
       timestamp: formatISTTime(now),
       createdAt: now.toISOString(),
       rawTime: now.getTime(),
-      status: 'delivered'
+      status: initialStatus
     };
 
     if (!messages[chatId]) {
@@ -121,18 +126,42 @@ export function setupChatHandlers(io, socket, userSocketMap) {
     });
   });
 
-  // Mark message as read
+  // Mark single message as seen/read
   socket.on('mark-read', ({ chatId, messageId, readerId }) => {
     if (messages[chatId]) {
       messages[chatId] = messages[chatId].map(msg => 
-        msg.id === messageId ? { ...msg, status: 'read' } : msg
+        msg.id === messageId ? { ...msg, status: 'seen' } : msg
       );
+      saveDatabase();
     }
     io.to(chatId).emit('message-status-updated', {
       chatId,
       messageId,
-      status: 'read'
+      status: 'seen'
     });
+  });
+
+  // Mark all unread messages in chat as seen when recipient opens the chat
+  socket.on('mark-chat-seen', ({ chatId, readerId }) => {
+    if (messages[chatId]) {
+      let anySeen = false;
+      const seenIds = [];
+      messages[chatId].forEach(msg => {
+        if (msg.senderId !== readerId && msg.status !== 'seen' && msg.status !== 'read') {
+          msg.status = 'seen';
+          seenIds.push(msg.id);
+          anySeen = true;
+        }
+      });
+      if (anySeen) {
+        saveDatabase();
+        io.to(chatId).emit('chat-messages-seen', {
+          chatId,
+          readerId,
+          seenIds
+        });
+      }
+    }
   });
 
   // Emoji Reaction on a message

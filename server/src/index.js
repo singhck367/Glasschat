@@ -11,7 +11,7 @@ import dotenv from 'dotenv';
 import apiRoutes from './routes/api.js';
 import { setupChatHandlers } from './socket/chatHandler.js';
 import { setupCallHandlers } from './socket/callHandler.js';
-import { users, saveDatabase } from './data/store.js';
+import { users, messages, saveDatabase } from './data/store.js';
 
 dotenv.config();
 
@@ -157,6 +157,31 @@ io.on('connection', (socket) => {
 
     // Broadcast online status
     io.emit('user-status-changed', { userId, online: true });
+
+    // When recipient comes online (data ON): update pending 'sent' messages to 'delivered'
+    try {
+      let anyDelivered = false;
+      Object.keys(messages).forEach(cId => {
+        let chatUpdated = false;
+        const deliveredIds = [];
+        messages[cId].forEach(m => {
+          if ((m.recipientId === userId || (!m.recipientId && cId.includes(userId))) && m.senderId !== userId && m.status === 'sent') {
+            m.status = 'delivered';
+            deliveredIds.push(m.id);
+            chatUpdated = true;
+            anyDelivered = true;
+          }
+        });
+        if (chatUpdated) {
+          io.to(cId).emit('messages-delivered', { chatId: cId, deliveredIds });
+        }
+      });
+      if (anyDelivered) {
+        saveDatabase();
+      }
+    } catch (e) {
+      console.warn('[Message Delivery Sync Error]:', e);
+    }
   });
 
   // Attach specialized event handlers
