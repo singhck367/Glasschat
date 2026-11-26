@@ -14,6 +14,22 @@ export default defineConfig({
         target: 'http://localhost:5000',
         changeOrigin: true
       },
+      '/download-apk': {
+        target: 'http://localhost:5000',
+        changeOrigin: true
+      },
+      '/download-ipa': {
+        target: 'http://localhost:5000',
+        changeOrigin: true
+      },
+      '/ios-manifest.plist': {
+        target: 'http://localhost:5000',
+        changeOrigin: true
+      },
+      '/health': {
+        target: 'http://localhost:5000',
+        changeOrigin: true
+      },
       '/socket.io': {
         target: 'http://localhost:5000',
         ws: true

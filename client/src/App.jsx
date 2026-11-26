@@ -20,8 +20,8 @@ import { Smartphone, Monitor } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { formatISTTime } from './utils/time';
 
-export const APP_VERSION = '1.3.0';
-export const APP_VERSION_CODE = 130;
+export const APP_VERSION = '1.3.1';
+export const APP_VERSION_CODE = 131;
 
 // Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
 function isVersionGreater(remoteVer, currentVer) {
@@ -202,9 +202,9 @@ export default function App() {
                         isVersionGreater(data.latestVersion, APP_VERSION);
         const dismissed = localStorage.getItem('glasschat_update_dismissed') === data.latestVersion;
         if (isNewer && (!dismissed || manual)) {
-          setUpdateInfo(data);
+          setUpdateInfo({ ...data, alreadyLatest: false });
         } else if (manual) {
-          alert(`✨ GlassChat is up to date (v${APP_VERSION})`);
+          setUpdateInfo({ ...data, alreadyLatest: true });
         }
       }
     } catch (e) {

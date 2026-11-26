@@ -126,7 +126,7 @@ app.get('/ios-manifest.plist', (req, res) => {
                 <key>bundle-identifier</key>
                 <string>com.glasschat.app</string>
                 <key>bundle-version</key>
-                <string>1.3.0</string>
+                <string>1.3.1</string>
                 <key>kind</key>
                 <string>software</string>
                 <key>title</key>
@@ -153,16 +153,20 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Serve static client build (Vite dist) if available
+// Serve static client build (Vite dist or bundled server/public) if available
 const clientDistPath = path.resolve(__dirname, '../../client/dist');
-const indexPath = path.join(clientDistPath, 'index.html');
-if (fs.existsSync(indexPath)) {
-  app.use(express.static(clientDistPath));
+const serverPublicPath = path.resolve(__dirname, '../public');
+const activeStaticPath = fs.existsSync(path.join(clientDistPath, 'index.html'))
+  ? clientDistPath
+  : (fs.existsSync(path.join(serverPublicPath, 'index.html')) ? serverPublicPath : null);
+
+if (activeStaticPath) {
+  app.use(express.static(activeStaticPath));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/download-ipa' || req.path === '/ios-manifest.plist' || req.path === '/health' || req.path.startsWith('/socket.io')) {
       return next();
     }
-    res.sendFile(indexPath);
+    res.sendFile(path.join(activeStaticPath, 'index.html'));
   });
 } else {
   app.get('/', (req, res) => {

@@ -1,0 +1,25 @@
+{
+  "name": "GlassChat Messenger",
+  "short_name": "GlassChat",
+  "description": "Pure Glassmorphism Messenger with HD Audio/Video Calling",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EBF2FA",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/logo192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

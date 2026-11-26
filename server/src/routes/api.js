@@ -930,18 +930,17 @@ router.delete('/admin/otp-logs/clear', (req, res) => {
 // App Version & In-App Auto Update Checker
 router.get('/app-version', (req, res) => {
   res.json({
-    latestVersion: '1.3.0',
-    versionCode: 130,
+    latestVersion: '1.3.1',
+    versionCode: 131,
     currentVersion: '1.0.0',
     releaseDate: '2026-11-26',
-    title: 'GlassChat v1.3.0 Ultimate Update ✨',
+    title: 'GlassChat v1.3.1 Clean Release & PWA ✨',
     releaseNotes: [
-      '⚡ Red ➔ Green ➔ Blue dynamic text & tick colors (Sent, Delivered, Seen)',
-      '🌐 Instant In-Chat AI Translator (Hindi ↔ English)',
-      '🚨 Emergency Priority Buzz Alert with instant loud chime',
-      '📱 Full compatibility for Android 11, 10, 9 & 8 (zero mute/freezing)',
-      '📞 WebRTC long calls (5+ min) anti-freeze with carrier NAT keep-alive',
-      '🔍 In-Chat Message Search & WhatsApp-style Floating Emoji Reactions'
+      '🛡️ Removed Play Protect dropper triggers & upgraded to v1+v2+v3 Signed Release APK',
+      '📱 Added iPhone / iPad Native Safari Home Screen Web App (PWA) & auto-update support',
+      '🎨 Brand new 3D GlassChat Icon across Android, iOS & Web',
+      '⚡ Red ➔ Green ➔ Blue dynamic text & tick colors + Inline AI Translator',
+      '📞 Android <12 audio fix & WebRTC 5+ min anti-freeze stability'
     ],
     downloadUrl: '/download-apk',
     iosDownloadUrl: '/download-ipa',
