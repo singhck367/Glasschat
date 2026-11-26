@@ -20,8 +20,8 @@ import { Smartphone, Monitor } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { formatISTTime } from './utils/time';
 
-export const APP_VERSION = '1.2.0';
-export const APP_VERSION_CODE = 120;
+export const APP_VERSION = '1.3.0';
+export const APP_VERSION_CODE = 130;
 
 // Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
 function isVersionGreater(remoteVer, currentVer) {

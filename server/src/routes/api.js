@@ -930,18 +930,18 @@ router.delete('/admin/otp-logs/clear', (req, res) => {
 // App Version & In-App Auto Update Checker
 router.get('/app-version', (req, res) => {
   res.json({
-    latestVersion: '1.2.0',
-    versionCode: 120,
+    latestVersion: '1.3.0',
+    versionCode: 130,
     currentVersion: '1.0.0',
-    releaseDate: '2026-11-22',
-    title: 'GlassChat v1.2.0 Super Update ✨',
+    releaseDate: '2026-11-26',
+    title: 'GlassChat v1.3.0 Ultimate Update ✨',
     releaseNotes: [
-      '🔄 Front & Back Camera Flip during live video calls',
-      '🖥️ Live Screen Sharing / Screen Cast support',
-      '👥 Add & Invite participants into an active call on the fly',
-      '📱 True Immersive Edge-to-Edge Full Screen Video',
-      '🔄 Tap-to-Swap Video Views (toggle PiP and main camera with 1 tap)',
-      '🔊 Studio-Grade Audio Engine with Zero-Echo Crystal Voice'
+      '⚡ Red ➔ Green ➔ Blue dynamic text & tick colors (Sent, Delivered, Seen)',
+      '🌐 Instant In-Chat AI Translator (Hindi ↔ English)',
+      '🚨 Emergency Priority Buzz Alert with instant loud chime',
+      '📱 Full compatibility for Android 11, 10, 9 & 8 (zero mute/freezing)',
+      '📞 WebRTC long calls (5+ min) anti-freeze with carrier NAT keep-alive',
+      '🔍 In-Chat Message Search & WhatsApp-style Floating Emoji Reactions'
     ],
     downloadUrl: '/download-apk',
     forceUpdate: false
