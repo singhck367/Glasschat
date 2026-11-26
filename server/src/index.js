@@ -100,6 +100,46 @@ app.get('/download-ipa', (req, res) => {
   res.status(404).send('IPA file not hosted directly on this instance.');
 });
 
+// Over-The-Air (OTA) iOS manifest for native in-browser installation
+app.get('/ios-manifest.plist', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  const ipaUrl = `${protocol}://${host}/download-ipa`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>items</key>
+    <array>
+        <dict>
+            <key>assets</key>
+            <array>
+                <dict>
+                    <key>kind</key>
+                    <string>software-package</string>
+                    <key>url</key>
+                    <string>${ipaUrl}</string>
+                </dict>
+            </array>
+            <key>metadata</key>
+            <dict>
+                <key>bundle-identifier</key>
+                <string>com.glasschat.app</string>
+                <key>bundle-version</key>
+                <string>1.3.0</string>
+                <key>kind</key>
+                <string>software</string>
+                <key>title</key>
+                <string>GlassChat</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>`;
+  res.set('Content-Type', 'text/xml');
+  res.send(plist);
+});
+
 // API Routes
 app.use('/api', apiRoutes);
 
@@ -119,7 +159,7 @@ const indexPath = path.join(clientDistPath, 'index.html');
 if (fs.existsSync(indexPath)) {
   app.use(express.static(clientDistPath));
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/health' || req.path.startsWith('/socket.io')) {
+    if (req.path.startsWith('/api') || req.path === '/download-apk' || req.path === '/download-ipa' || req.path === '/ios-manifest.plist' || req.path === '/health' || req.path.startsWith('/socket.io')) {
       return next();
     }
     res.sendFile(indexPath);

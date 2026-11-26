@@ -1,16 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, X, CheckCircle2, ArrowUpCircle, ShieldCheck, RefreshCw, AlertCircle } from 'lucide-react';
+import { Download, X, CheckCircle2, ArrowUpCircle, ShieldCheck, RefreshCw, AlertCircle, Apple, Smartphone, Share2, HelpCircle } from 'lucide-react';
 import { getServerBaseUrl } from '../services/config';
 
 export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '1.0.0' }) {
   if (!updateInfo) return null;
 
+  // Platform detection
+  const isIOS = typeof navigator !== 'undefined' && (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+  const isAndroid = typeof navigator !== 'undefined' && /Android/.test(navigator.userAgent);
+  const isNativeAndroid = typeof window !== 'undefined' && !!window.AndroidInstaller;
+
   // 'idle' | 'downloading' | 'ready' | 'error'
   const [downloadStatus, setDownloadStatus] = useState('idle');
   const [progress, setProgress] = useState(0);
   const [downloadedMb, setDownloadedMb] = useState('0');
-  const [totalMb, setTotalMb] = useState('3.7');
+  const [totalMb, setTotalMb] = useState(isIOS ? '1.0' : '5.5');
   const [errorMsg, setErrorMsg] = useState('');
+  const [showIosGuide, setShowIosGuide] = useState(false);
   const downloadedBlobRef = useRef(null);
 
   // Clean up global callbacks on unmount
@@ -23,7 +32,9 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
   }, []);
 
   const resolveDownloadUrl = () => {
-    const rawUrl = updateInfo.downloadUrl || '/download-apk';
+    const rawUrl = isIOS 
+      ? (updateInfo.iosDownloadUrl || '/download-ipa')
+      : (updateInfo.downloadUrl || '/download-apk');
     if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
       return rawUrl;
     }
@@ -40,7 +51,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
     const targetUrl = resolveDownloadUrl();
 
     // 1. Native Android Capacitor App via AndroidInstaller Bridge
-    if (typeof window !== 'undefined' && window.AndroidInstaller) {
+    if (isNativeAndroid) {
       window.__onApkDownloadProgress = (percent, curBytes, totBytes) => {
         setProgress(Math.min(100, Math.max(0, percent)));
         if (totBytes > 0) {
@@ -70,14 +81,14 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
       return;
     }
 
-    // 2. Web browser fallback with in-app streaming download
+    // 2. iOS or Web browser fallback with in-app streaming download
     try {
       const response = await fetch(targetUrl);
       if (!response.ok) {
         throw new Error(`Server returned HTTP ${response.status}`);
       }
 
-      const contentLength = +response.headers.get('Content-Length') || 3950002;
+      const contentLength = +response.headers.get('Content-Length') || (isIOS ? 1000000 : 5580000);
       setTotalMb((contentLength / (1024 * 1024)).toFixed(1));
 
       const reader = response.body.getReader();
@@ -95,21 +106,22 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
         setDownloadedMb((receivedLength / (1024 * 1024)).toFixed(1));
       }
 
-      const blob = new Blob(chunks, { type: 'application/vnd.android.package-archive' });
+      const mimeType = isIOS ? 'application/octet-stream' : 'application/vnd.android.package-archive';
+      const blob = new Blob(chunks, { type: mimeType });
       downloadedBlobRef.current = blob;
       setProgress(100);
       setDownloadStatus('ready');
 
     } catch (err) {
-      console.error('Web download error:', err);
+      console.error('Download error:', err);
       setDownloadStatus('error');
       setErrorMsg(err.message || 'Network error while downloading.');
     }
   };
 
   const handleInstallNow = () => {
-    // Native APK Installer
-    if (typeof window !== 'undefined' && window.AndroidInstaller) {
+    // 1. Native Android APK Installer
+    if (isNativeAndroid) {
       try {
         window.AndroidInstaller.installDownloadedApk();
       } catch (e) {
@@ -119,7 +131,27 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
       return;
     }
 
-    // Web browser fallback: trigger save file
+    // 2. iOS Specific Handling
+    if (isIOS) {
+      if (downloadedBlobRef.current) {
+        const url = URL.createObjectURL(downloadedBlobRef.current);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'GlassChat.ipa';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 1000);
+      } else {
+        window.open(resolveDownloadUrl(), '_blank');
+      }
+      setShowIosGuide(true);
+      return;
+    }
+
+    // 3. Android Web browser fallback: trigger save APK file
     if (downloadedBlobRef.current) {
       const url = URL.createObjectURL(downloadedBlobRef.current);
       const a = document.createElement('a');
@@ -134,6 +166,12 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
     } else {
       window.open(resolveDownloadUrl(), '_blank');
     }
+  };
+
+  const handleIosOtaInstall = () => {
+    const base = getServerBaseUrl().replace(/\/+$/, '');
+    const manifestUrl = `${base}/ios-manifest.plist`;
+    window.location.href = `itms-services://?action=download-manifest&url=${encodeURIComponent(manifestUrl)}`;
   };
 
   return (
@@ -238,11 +276,11 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 {downloadStatus === 'ready' ? 'READY TO INSTALL' : (downloadStatus === 'downloading' ? 'DOWNLOADING UPDATE' : 'UPDATE AVAILABLE')}
               </span>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: '600' }}>
-                v{updateInfo.latestVersion || '1.2.0'}
+                v{updateInfo.latestVersion || '1.3.0'}
               </span>
             </div>
             <h3 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', margin: '4px 0 0 0' }}>
-              {updateInfo.title || 'New GlassChat Update'}
+              {isIOS ? 'GlassChat for iOS Update' : (updateInfo.title || 'New GlassChat Update')}
             </h3>
           </div>
         </div>
@@ -256,12 +294,55 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
           borderRadius: '14px',
           backgroundColor: 'rgba(0, 0, 0, 0.03)',
           border: '1px solid rgba(0, 0, 0, 0.06)',
-          marginBottom: '16px',
+          marginBottom: '14px',
           fontSize: '12px'
         }}>
           <span style={{ color: 'var(--text-secondary)' }}>Installed: <strong>v{currentVersion}</strong></span>
-          <span style={{ color: '#0284c7', fontWeight: '800' }}>Latest: <strong>v{updateInfo.latestVersion || '1.2.0'}</strong> (3.7 MB)</span>
+          <span style={{ color: '#0284c7', fontWeight: '800' }}>
+            Package: <strong>{isIOS ? 'GlassChat.ipa' : 'GlassChat.apk'}</strong> ({isIOS ? '1 MB' : '5.5 MB'})
+          </span>
         </div>
+
+        {/* iOS Specific Guidance Card */}
+        {isIOS && (
+          <div style={{
+            padding: '12px 14px',
+            borderRadius: '16px',
+            backgroundColor: 'rgba(2, 132, 199, 0.06)',
+            border: '1px solid rgba(2, 132, 199, 0.2)',
+            marginBottom: '14px',
+            fontSize: '12px',
+            lineHeight: '1.4'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: '800', color: '#0284c7', marginBottom: '6px' }}>
+              <Apple size={15} />
+              <span>iOS Installation Methods:</span>
+            </div>
+            <div style={{ color: 'var(--text-primary)', marginBottom: '8px' }}>
+              <strong>1. Instant Safari Update (Recommended):</strong> Safari me <strong>Share [↑] ➔ 'Add to Home Screen'</strong> tap karein. Bina kisi certificate ke instant update ho jayega!
+            </div>
+            <div style={{ color: 'var(--text-primary)' }}>
+              <strong>2. Sideloading:</strong> Niche se <strong>Download iOS (.ipa)</strong> karke AltStore, Scarlet, TrollStore ya Sideloadly se install karein.
+            </div>
+          </div>
+        )}
+
+        {/* Android Play Protect Guidance Card */}
+        {isAndroid && (
+          <div style={{
+            padding: '10px 12px',
+            borderRadius: '14px',
+            backgroundColor: 'rgba(16, 185, 129, 0.06)',
+            border: '1px solid rgba(16, 185, 129, 0.2)',
+            marginBottom: '14px',
+            fontSize: '11px',
+            lineHeight: '1.35',
+            color: '#065f46'
+          }}>
+            <strong>🛡️ Play Protect / Safe Install Notice:</strong><br />
+            Yeh APK official release key se signed hai. Install ke time agar 'Blocked by Play Protect' ya 'Unsafe app' prompt aaye, to <strong>'More details' ➔ 'Install anyway'</strong> select karein.
+          </div>
+        )}
 
         {/* Dynamic Body: Release Notes or Download Progress */}
         {downloadStatus === 'idle' && (
@@ -270,7 +351,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
               What's New in this Release:
             </h4>
             <div style={{
-              maxHeight: '170px',
+              maxHeight: '140px',
               overflowY: 'auto',
               padding: '10px 12px',
               borderRadius: '16px',
@@ -308,7 +389,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <RefreshCw size={15} color="#0284c7" style={{ animation: 'spin 1.2s linear infinite' }} />
-                <span style={{ fontSize: '13px', fontWeight: '800', color: '#0284c7' }}>Downloading Update...</span>
+                <span style={{ fontSize: '13px', fontWeight: '800', color: '#0284c7' }}>Downloading {isIOS ? 'GlassChat.ipa' : 'GlassChat.apk'}...</span>
               </div>
               <span style={{ fontSize: '13px', fontWeight: '800', color: '#0284c7' }}>{progress}%</span>
             </div>
@@ -333,7 +414,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
 
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-secondary)' }}>
               <span>{downloadedMb} MB of {totalMb} MB</span>
-              <span>Downloading internally...</span>
+              <span>Downloading package...</span>
             </div>
           </div>
         )}
@@ -353,7 +434,9 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
               <span style={{ fontSize: '14px', fontWeight: '800', color: '#065f46' }}>Download Completed!</span>
             </div>
             <p style={{ fontSize: '12px', color: '#047857', margin: 0 }}>
-              The update is ready to install directly without leaving the app.
+              {isIOS 
+                ? 'GlassChat.ipa download ho gaya hai! Isse AltStore ya Scarlet se install karein, ya Safari Add to Home Screen use karein.' 
+                : 'The update is ready to install directly without leaving the app.'}
             </p>
           </div>
         )}
@@ -381,116 +464,143 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
         {/* Security badge */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '18px', fontSize: '11px', color: '#10b981' }}>
           <ShieldCheck size={14} />
-          <span>Verified In-App Update Engine • 100% Safe & Direct</span>
+          <span>Official Signed Release • 100% Safe & Direct</span>
         </div>
 
         {/* Actions Button Bar */}
-        <div style={{ display: 'flex', gap: '10px' }}>
-          {!updateInfo.forceUpdate && downloadStatus !== 'downloading' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {!updateInfo.forceUpdate && downloadStatus !== 'downloading' && (
+              <button
+                onClick={onClose}
+                className="glass-btn"
+                style={{
+                  flex: 1,
+                  height: '46px',
+                  borderRadius: '16px',
+                  fontWeight: '700',
+                  fontSize: '13px',
+                  color: 'var(--text-secondary)'
+                }}
+              >
+                Later
+              </button>
+            )}
+
+            {downloadStatus === 'idle' && (
+              <button
+                onClick={handleStartDownload}
+                className="glass-btn glass-btn-primary"
+                style={{
+                  flex: 2,
+                  height: '46px',
+                  borderRadius: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontWeight: '800',
+                  fontSize: '13px',
+                  background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+                  boxShadow: '0 8px 24px rgba(2, 132, 199, 0.35)'
+                }}
+              >
+                <Download size={16} />
+                {isIOS ? 'Download iOS (.ipa)' : 'Download Update (APK)'}
+              </button>
+            )}
+
+            {downloadStatus === 'downloading' && (
+              <button
+                disabled
+                style={{
+                  flex: 1,
+                  height: '46px',
+                  borderRadius: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontWeight: '800',
+                  fontSize: '13px',
+                  color: '#ffffff',
+                  backgroundColor: 'rgba(2, 132, 199, 0.5)',
+                  cursor: 'not-allowed',
+                  border: 'none'
+                }}
+              >
+                <RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} />
+                Downloading ({progress}%)...
+              </button>
+            )}
+
+            {downloadStatus === 'ready' && (
+              <button
+                onClick={handleInstallNow}
+                className="glass-btn glass-btn-primary"
+                style={{
+                  flex: 2,
+                  height: '46px',
+                  borderRadius: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontWeight: '800',
+                  fontSize: '13px',
+                  background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                  boxShadow: '0 8px 24px rgba(16, 185, 129, 0.35)'
+                }}
+              >
+                <CheckCircle2 size={16} />
+                {isIOS ? 'Open / Save GlassChat.ipa 📲' : 'Install & Update Now 🚀'}
+              </button>
+            )}
+
+            {downloadStatus === 'error' && (
+              <button
+                onClick={handleStartDownload}
+                className="glass-btn glass-btn-primary"
+                style={{
+                  flex: 2,
+                  height: '46px',
+                  borderRadius: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontWeight: '800',
+                  fontSize: '13px'
+                }}
+              >
+                <RefreshCw size={16} />
+                Retry Download
+              </button>
+            )}
+          </div>
+
+          {/* Secondary iOS Direct OTA Button */}
+          {isIOS && downloadStatus === 'idle' && (
             <button
-              onClick={onClose}
+              onClick={handleIosOtaInstall}
               className="glass-btn"
               style={{
-                flex: 1,
-                height: '46px',
-                borderRadius: '16px',
+                width: '100%',
+                height: '40px',
+                borderRadius: '14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
                 fontWeight: '700',
-                fontSize: '13px',
-                color: 'var(--text-secondary)'
+                fontSize: '12px',
+                color: '#0284c7',
+                backgroundColor: 'rgba(2, 132, 199, 0.08)',
+                border: '1px solid rgba(2, 132, 199, 0.2)'
               }}
             >
-              Later
-            </button>
-          )}
-
-          {downloadStatus === 'idle' && (
-            <button
-              onClick={handleStartDownload}
-              className="glass-btn glass-btn-primary"
-              style={{
-                flex: 2,
-                height: '46px',
-                borderRadius: '16px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                fontWeight: '800',
-                fontSize: '13px',
-                background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
-                boxShadow: '0 8px 24px rgba(2, 132, 199, 0.35)'
-              }}
-            >
-              <Download size={16} />
-              Download Update (3.7 MB)
-            </button>
-          )}
-
-          {downloadStatus === 'downloading' && (
-            <button
-              disabled
-              style={{
-                flex: 1,
-                height: '46px',
-                borderRadius: '16px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                fontWeight: '800',
-                fontSize: '13px',
-                color: '#ffffff',
-                backgroundColor: 'rgba(2, 132, 199, 0.5)',
-                cursor: 'not-allowed',
-                border: 'none'
-              }}
-            >
-              <RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} />
-              Downloading ({progress}%)...
-            </button>
-          )}
-
-          {downloadStatus === 'ready' && (
-            <button
-              onClick={handleInstallNow}
-              className="glass-btn glass-btn-primary"
-              style={{
-                flex: 2,
-                height: '46px',
-                borderRadius: '16px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                fontWeight: '800',
-                fontSize: '13px',
-                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                boxShadow: '0 8px 24px rgba(16, 185, 129, 0.35)'
-              }}
-            >
-              <CheckCircle2 size={16} />
-              Install & Update Now 🚀
-            </button>
-          )}
-
-          {downloadStatus === 'error' && (
-            <button
-              onClick={handleStartDownload}
-              className="glass-btn glass-btn-primary"
-              style={{
-                flex: 2,
-                height: '46px',
-                borderRadius: '16px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                fontWeight: '800',
-                fontSize: '13px'
-              }}
-            >
-              <RefreshCw size={16} />
-              Retry Download
+              <Apple size={14} />
+              Try Direct iOS OTA Install (Safari)
             </button>
           )}
         </div>

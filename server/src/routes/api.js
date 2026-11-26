@@ -944,6 +944,8 @@ router.get('/app-version', (req, res) => {
       '🔍 In-Chat Message Search & WhatsApp-style Floating Emoji Reactions'
     ],
     downloadUrl: '/download-apk',
+    iosDownloadUrl: '/download-ipa',
+    iosManifestUrl: '/ios-manifest.plist',
     forceUpdate: false
   });
 });
