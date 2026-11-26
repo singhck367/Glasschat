@@ -1,7 +1,21 @@
 import express from 'express';
-import { users, groups, messages, calls, statuses, otpStore, otpLogs, activeCallRooms, saveDatabase } from '../data/store.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import {
+  users, groups, messages, calls, statuses,
+  scheduledMessages, chatSettings, reports, blockedRelations, callRecordings,
+  otpStore, otpLogs, activeCallRooms, activeOneOnOneCalls, activeSessions, saveDatabase
+} from '../data/store.js';
 import { v4 as uuidv4 } from 'uuid';
 import { formatISTTime, formatISTDateTime } from '../utils/time.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const RECORDINGS_DIR = path.resolve(__dirname, '../../recordings');
+try {
+  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+} catch {}
 
 const router = express.Router();
 
@@ -330,15 +344,45 @@ router.get('/me', (req, res) => {
   res.json(me);
 });
 
-// Get all other registered users / contacts with phone/name search
+// Privacy-Strict Contacts Directory:
+// Only returns users who are saved in viewer's contacts OR share an existing chat/group.
+// Unknown strangers are NEVER listed publicly!
 router.get('/users', (req, res) => {
   const currentUserId = req.query.userId;
   const q = req.query.q?.trim().toLowerCase();
   const qDigits = req.query.q?.replace(/\D/g, '') || '';
 
-  let list = currentUserId 
-    ? users.filter(u => u.id !== currentUserId)
-    : users;
+  if (!currentUserId) {
+    return res.json([]);
+  }
+
+  const viewer = users.find(u => u.id === currentUserId);
+  const viewerSaved = Array.isArray(viewer?.savedContacts) ? viewer.savedContacts : [];
+
+  let list = users.filter(u => {
+    if (u.id === currentUserId) return false;
+    const uDigits = (u.phone || '').replace(/\D/g, '');
+    const uLast10 = uDigits.slice(-10);
+
+    // 1. Saved in viewer's contacts
+    const isSaved = viewerSaved.some(sc => {
+      const scDigits = (sc.cleanDigits || sc.phone || '').replace(/\D/g, '');
+      return (uLast10 && scDigits.endsWith(uLast10)) || (scDigits && uDigits.endsWith(scDigits));
+    });
+    if (isSaved) return true;
+
+    // 2. Existing 1-on-1 conversation history
+    const directChatId = `chat_${[currentUserId, u.id].sort().join('_')}`;
+    if (Array.isArray(messages[directChatId]) && messages[directChatId].length > 0) {
+      return true;
+    }
+
+    // 3. Shares a group with viewer
+    const sharesGroup = groups.some(g =>
+      Array.isArray(g.members) && g.members.includes(currentUserId) && g.members.includes(u.id)
+    );
+    return sharesGroup;
+  });
 
   if (q) {
     list = list.filter(u => {
@@ -351,6 +395,48 @@ router.get('/users', (req, res) => {
   }
 
   res.json(list);
+});
+
+// Exact Full-Number Discovery:
+// Only returns an unsaved registered user once a COMPLETE 10+ digit mobile number is entered.
+router.get('/users/find-by-phone', (req, res) => {
+  const rawPhone = String(req.query.phone || '').trim();
+  const viewerId = req.query.viewerId;
+  const cleanDigits = rawPhone.replace(/\D/g, '');
+
+  if (cleanDigits.length < 10) {
+    return res.json({
+      found: false,
+      incomplete: true,
+      message: 'Enter full 10-digit mobile number to search an unregistered/unsaved contact.'
+    });
+  }
+
+  const targetLast10 = cleanDigits.slice(-10);
+  const matched = users.find(u => {
+    if (viewerId && u.id === viewerId) return false;
+    const uDigits = (u.phone || '').replace(/\D/g, '');
+    const uLast10 = uDigits.slice(-10);
+    return uDigits === cleanDigits || (targetLast10.length === 10 && uLast10 === targetLast10);
+  });
+
+  if (!matched) {
+    return res.json({ found: false, incomplete: false, phone: rawPhone });
+  }
+
+  return res.json({
+    found: true,
+    incomplete: false,
+    user: {
+      id: matched.id,
+      name: matched.name,
+      phone: matched.phone,
+      avatar: matched.avatar,
+      status: matched.status,
+      online: Boolean(matched.online),
+      lastSeen: matched.lastSeen
+    }
+  });
 });
 
 // ==========================================
@@ -418,7 +504,7 @@ router.post('/contacts/save', (req, res) => {
   saveDatabase();
 
   // Notify user's connected socket sessions
-  req.io?.to(`user_${userId}`).emit('contacts-synced', {
+  req.io?.to(userId).emit('contacts-synced', {
     savedContacts: user.savedContacts
   });
 
@@ -482,7 +568,7 @@ router.post('/contacts/sync', (req, res) => {
 
   saveDatabase();
 
-  req.io?.to(`user_${userId}`).emit('contacts-synced', {
+  req.io?.to(userId).emit('contacts-synced', {
     savedContacts: user.savedContacts
   });
 
@@ -568,6 +654,7 @@ router.get('/status', (req, res) => {
     return {
       ...st,
       userName: user?.name || st.userName || 'User',
+      userPhone: user?.phone || st.userPhone || '',
       userAvatar: user?.avatar || st.userAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
       views: enrichedViews
     };
@@ -656,21 +743,23 @@ router.get('/groups', (req, res) => {
   res.json(groups);
 });
 
-// Create a new group
+// Create a new group or announcement channel
 router.post('/groups', (req, res) => {
-  const { name, description, avatar, members = [], creatorId = 'user_me' } = req.body;
+  const { name, description, avatar, members = [], creatorId = 'user_me', isChannel = false } = req.body;
   if (!name) {
-    return res.status(400).json({ error: 'Group name is required' });
+    return res.status(400).json({ error: 'Group / Channel name is required' });
   }
 
   const newGroup = {
     id: `group_${uuidv4().substring(0, 8)}`,
     name,
-    description: description || 'New GlassChat Group',
+    description: description || (isChannel ? 'Announcements Channel' : 'New GlassChat Group'),
     avatar: avatar || 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=200&q=80',
     members: Array.from(new Set([creatorId, ...members])),
     admin: creatorId,
+    admins: [creatorId],
     isGroup: true,
+    isChannel: Boolean(isChannel),
     createdAt: new Date().toISOString()
   };
 
@@ -680,7 +769,9 @@ router.post('/groups', (req, res) => {
       id: uuidv4(),
       senderId: 'system',
       senderName: 'System',
-      text: `Group "${name}" created with End-to-End Encryption 🔒`,
+      text: isChannel
+        ? `📢 Announcement Channel "${name}" created! Only Admins can post updates.`
+        : `Group "${name}" created with End-to-End Encryption 🔒`,
       timestamp: formatISTTime(new Date()),
       status: 'read'
     }
@@ -691,11 +782,345 @@ router.post('/groups', (req, res) => {
   res.status(201).json(newGroup);
 });
 
-// Get chat messages by chatId
+// Get chat messages by chatId (filtering expired disappearing messages)
 router.get('/chats/:chatId', (req, res) => {
   const { chatId } = req.params;
-  const chatMessages = messages[chatId] || [];
-  res.json(chatMessages);
+  const nowMs = Date.now();
+  const list = messages[chatId] || [];
+  const valid = list.filter(m => !m.expiresAt || m.expiresAt > nowMs);
+  if (valid.length !== list.length) {
+    messages[chatId] = valid;
+    saveDatabase();
+  }
+  res.json(valid);
+});
+
+// Get / Update Per-Chat Settings (Disappearing Timer, Pinned Message, Channel Info)
+router.get('/chats/:chatId/settings', (req, res) => {
+  const { chatId } = req.params;
+  const settings = chatSettings[chatId] || {};
+  const pinnedMsg = settings.pinnedMessageId
+    ? (messages[chatId] || []).find(m => m.id === settings.pinnedMessageId) || null
+    : null;
+  res.json({
+    ...settings,
+    pinnedMessage: pinnedMsg
+  });
+});
+
+router.post('/chats/:chatId/settings', (req, res) => {
+  const { chatId } = req.params;
+  const { disappearDurationMs, userId } = req.body;
+  if (!chatSettings[chatId]) chatSettings[chatId] = {};
+
+  if (disappearDurationMs !== undefined) {
+    chatSettings[chatId].disappearDurationMs = Number(disappearDurationMs) || 0;
+    chatSettings[chatId].updatedBy = userId;
+  }
+
+  saveDatabase();
+  req.io?.to(chatId).emit('chat-settings-updated', {
+    chatId,
+    settings: chatSettings[chatId]
+  });
+
+  res.json({ success: true, settings: chatSettings[chatId] });
+});
+
+// ==========================================
+// ⏰ SCHEDULED MESSAGES ROUTES
+// ==========================================
+router.get('/scheduled-messages', (req, res) => {
+  const { chatId, userId } = req.query;
+  const items = scheduledMessages.filter(item => {
+    if (chatId && item.payload?.chatId !== chatId) return false;
+    if (userId && item.payload?.senderId !== userId) return false;
+    return true;
+  });
+  res.json(items);
+});
+
+router.post('/scheduled-messages', (req, res) => {
+  const { sendAtMs, payload } = req.body;
+  if (!sendAtMs || !payload?.chatId || !payload?.senderId || !payload?.text) {
+    return res.status(400).json({ error: 'sendAtMs, chatId, senderId, and text are required.' });
+  }
+  const item = {
+    id: `sched_${uuidv4().substring(0, 8)}`,
+    sendAtMs: Number(sendAtMs),
+    sendAtFormatted: formatISTDateTime(new Date(Number(sendAtMs))),
+    payload,
+    createdAt: new Date().toISOString()
+  };
+  scheduledMessages.push(item);
+  saveDatabase();
+  res.status(201).json({ success: true, scheduled: item });
+});
+
+router.delete('/scheduled-messages/:id', (req, res) => {
+  const { id } = req.params;
+  const idx = scheduledMessages.findIndex(s => s.id === id);
+  if (idx !== -1) {
+    scheduledMessages.splice(idx, 1);
+    saveDatabase();
+    return res.json({ success: true });
+  }
+  res.status(404).json({ error: 'Scheduled message not found' });
+});
+
+// ==========================================
+// 🛡️ BLOCK, REPORT, FAMILY SAFE MODE & EMERGENCY SOS
+// ==========================================
+router.get('/contacts/blocked', (req, res) => {
+  const { userId } = req.query;
+  if (!userId) return res.json([]);
+  res.json(blockedRelations[userId] || []);
+});
+
+router.post('/contacts/block', (req, res) => {
+  const { userId, targetUserId } = req.body;
+  if (!userId || !targetUserId) return res.status(400).json({ error: 'Missing user IDs' });
+  if (!Array.isArray(blockedRelations[userId])) blockedRelations[userId] = [];
+
+  const isCurrentlyBlocked = blockedRelations[userId].includes(targetUserId);
+  if (isCurrentlyBlocked) {
+    blockedRelations[userId] = blockedRelations[userId].filter(id => id !== targetUserId);
+  } else {
+    blockedRelations[userId].push(targetUserId);
+  }
+  saveDatabase();
+  res.json({
+    success: true,
+    blocked: !isCurrentlyBlocked,
+    blockedList: blockedRelations[userId]
+  });
+});
+
+router.post('/contacts/report', (req, res) => {
+  const { reporterId, targetUserId, reason, details, chatId } = req.body;
+  if (!reporterId || !targetUserId) return res.status(400).json({ error: 'Invalid report' });
+  const entry = {
+    id: `rep_${uuidv4().substring(0, 8)}`,
+    reporterId,
+    targetUserId,
+    reason: reason || 'Spam / Abuse',
+    details: details || '',
+    chatId: chatId || null,
+    createdAt: formatISTDateTime(new Date())
+  };
+  reports.unshift(entry);
+  saveDatabase();
+  res.status(201).json({ success: true, report: entry });
+});
+
+router.post('/auth/family-safe', (req, res) => {
+  const { userId, enabled, pin, blockUnknownLinks, approveContactsOnly, dailyLimitMinutes } = req.body;
+  const user = users.find(u => u.id === userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  user.familySafe = {
+    enabled: Boolean(enabled),
+    pin: pin !== undefined ? String(pin).trim() : (user.familySafe?.pin || '1234'),
+    blockUnknownLinks: blockUnknownLinks !== undefined ? Boolean(blockUnknownLinks) : true,
+    approveContactsOnly: approveContactsOnly !== undefined ? Boolean(approveContactsOnly) : true,
+    dailyLimitMinutes: Number(dailyLimitMinutes) || 60
+  };
+  saveDatabase();
+  req.io?.emit('user-updated', user);
+  res.json({ success: true, user });
+});
+
+router.post('/auth/sos-contacts', (req, res) => {
+  const { userId, trustedContacts = [] } = req.body;
+  const user = users.find(u => u.id === userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  user.sosContacts = Array.isArray(trustedContacts) ? trustedContacts : [];
+  saveDatabase();
+  req.io?.emit('user-updated', user);
+  res.json({ success: true, user });
+});
+
+router.post('/sos/trigger', (req, res) => {
+  const { userId, location = null, note = '' } = req.body;
+  const sender = users.find(u => u.id === userId);
+  if (!sender) return res.status(404).json({ error: 'User not found' });
+
+  const mapsLink = location?.lat && location?.lng
+    ? `https://maps.google.com/?q=${location.lat},${location.lng}`
+    : '';
+  const sosText = `🆘 EMERGENCY SOS ALERT from ${sender.name || sender.phone}!${note ? ` "${note}"` : ''}${mapsLink ? `\n📍 Live Location: ${mapsLink}` : ''}`;
+
+  const trusted = Array.isArray(sender.sosContacts) ? sender.sosContacts : [];
+  let notifiedCount = 0;
+
+  trusted.forEach(tc => {
+    const tDigits = (tc.phone || '').replace(/\D/g, '').slice(-10);
+    const targetUser = users.find(u => {
+      if (tc.userId && u.id === tc.userId) return true;
+      const uDigits = (u.phone || '').replace(/\D/g, '').slice(-10);
+      return tDigits && uDigits === tDigits;
+    });
+    if (targetUser) {
+      const chatId = `chat_${[sender.id, targetUser.id].sort().join('_')}`;
+      if (!messages[chatId]) messages[chatId] = [];
+      const sosMsg = {
+        id: uuidv4(),
+        senderId: sender.id,
+        senderName: sender.name,
+        senderPhone: sender.phone,
+        senderAvatar: sender.avatar,
+        recipientId: targetUser.id,
+        text: sosText,
+        type: location ? 'location' : 'text',
+        locationData: location || undefined,
+        isUrgent: true,
+        isSos: true,
+        timestamp: formatISTTime(new Date()),
+        createdAt: new Date().toISOString(),
+        rawTime: Date.now(),
+        status: 'delivered'
+      };
+      messages[chatId].push(sosMsg);
+      req.io?.to(chatId).to(targetUser.id).to(sender.id).emit('new-message', { chatId, message: sosMsg });
+      req.io?.to(targetUser.id).emit('incoming-message-alert', {
+        chatId,
+        senderId: sender.id,
+        senderName: `🆘 SOS: ${sender.name || sender.phone}`,
+        text: sosText,
+        isUrgent: true
+      });
+      notifiedCount++;
+    }
+  });
+
+  saveDatabase();
+  res.json({ success: true, notifiedCount, sosText });
+});
+
+// ==========================================
+// 🤖 TRUTH CHECK (FACT-CHECK) & AI SUMMARY
+// ==========================================
+router.post('/ai/truth-check', async (req, res) => {
+  const { text = '' } = req.body;
+  const clean = String(text || '').trim();
+  if (!clean) return res.status(400).json({ error: 'Message text required' });
+
+  const lower = clean.toLowerCase();
+  const warnings = [];
+  let riskScore = 0;
+
+  // 1. Check Indian Scam / Phishing / Forwarded Hoax signatures
+  if (/(free recharge|free 5g|free iphone|lottery|won ₹|kbc|kyc update|account blocked|pan update|sbi.*link|bit\.ly|tinyurl|\.(xyz|top|click|tk|ml|online|site)\b)/i.test(clean)) {
+    riskScore += 55;
+    warnings.push('Suspicious URL, KYC/lottery bait, or phishing domain pattern detected.');
+  }
+  if (/(forward.*(10|5|20).*people|share with.*groups|unesco declared|nasa confirmed|who warned today|100% guarantee|viral news)/i.test(lower)) {
+    riskScore += 40;
+    warnings.push('Chain-forward or unverified sensational claim pattern detected.');
+  }
+  if (/http:\/\//i.test(clean)) {
+    riskScore += 20;
+    warnings.push('Insecure non-HTTPS link detected.');
+  }
+
+  // 2. Live Wikipedia Reference Check on claim keywords
+  let wikiReferences = [];
+  try {
+    const queryWords = clean
+      .replace(/https?:\/\/\S+/gi, '')
+      .replace(/[^\w\s\u0900-\u097F]/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(w => w.length > 3)
+      .slice(0, 5)
+      .join(' ');
+
+    if (queryWords.length >= 4) {
+      const wikiRes = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=2&srsearch=${encodeURIComponent(queryWords)}`,
+        { signal: AbortSignal.timeout(4500) }
+      );
+      if (wikiRes.ok) {
+        const wikiJson = await wikiRes.json();
+        wikiReferences = (wikiJson?.query?.search || []).map(item => ({
+          title: item.title,
+          snippet: item.snippet.replace(/<[^>]+>/g, ''),
+          url: `https://en.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/\s+/g, '_'))}`
+        }));
+      }
+    }
+  } catch (err) {
+    // Offline fallback gracefully handled
+  }
+
+  let verdict = 'Unverified — Verify Before Forwarding';
+  let level = 'caution'; // 'safe' | 'caution' | 'danger'
+
+  if (riskScore >= 40) {
+    verdict = '🚨 Likely Hoax / Scam Forward';
+    level = 'danger';
+  } else if (warnings.length === 0 && wikiReferences.length > 0 && !/(forward|secret|claim|rumor)/i.test(lower)) {
+    verdict = '✅ Informational Context Found';
+    level = 'safe';
+  }
+
+  res.json({
+    verdict,
+    level,
+    riskScore,
+    reasons: warnings.length > 0
+      ? warnings
+      : ['No obvious scam links or spam patterns found. Always verify from official sources before forwarding.'],
+    references: wikiReferences
+  });
+});
+
+router.post('/ai/summarize', (req, res) => {
+  const { chatId } = req.body;
+  const list = messages[chatId] || [];
+  if (!list.length) {
+    return res.json({
+      summary: 'No messages available to summarize in this chat yet.',
+      decisions: [],
+      questions: [],
+      actionItems: [],
+      messageCount: 0
+    });
+  }
+
+  const recent = list.slice(-60).filter(m => m.text && m.senderId !== 'system');
+  const decisions = [];
+  const questions = [];
+  const actionItems = [];
+  const participants = new Set();
+
+  recent.forEach(m => {
+    const sender = users.find(u => u.id === m.senderId)?.name || m.senderName || 'Contact';
+    participants.add(sender);
+    const t = m.text || '';
+    const tl = t.toLowerCase();
+
+    if (t.includes('?') || /\b(kya|kab|kaha|kaise|kyu|who|what|when|where|why)\b/i.test(tl)) {
+      questions.push(`${sender}: ${t.slice(0, 90)}`);
+    }
+    if (/\b(done|decided|final|confirm|thik hai|ok done|agree|tay hua|locked|plan)\b/i.test(tl)) {
+      decisions.push(`${sender}: ${t.slice(0, 90)}`);
+    }
+    if (/\b(baje|kal|tomorrow|meeting|yaad|remind|paise|upi|dena hai|send|bhejo|tarikh)\b/i.test(tl) || m.type === 'contract' || m.type === 'event' || m.type === 'upi') {
+      actionItems.push(`${sender}: ${t.slice(0, 90)}`);
+    }
+  });
+
+  const lastLines = recent.slice(-3).map(m => `${m.senderName || 'Contact'}: "${m.text.slice(0, 60)}"`).join(' • ');
+
+  res.json({
+    messageCount: recent.length,
+    participants: Array.from(participants),
+    summary: `Overview of ${recent.length} messages (${participants.size} members) — Latest messages: ${lastLines}`,
+    decisions: decisions.slice(-5),
+    questions: questions.slice(-5),
+    actionItems: actionItems.slice(-5)
+  });
 });
 
 // Get recent summaries for all chats
@@ -710,7 +1135,7 @@ router.get('/chats-summary', (req, res) => {
         timestamp: lastMsg.timestamp,
         rawTime: lastMsg.rawTime || (lastMsg.createdAt ? new Date(lastMsg.createdAt).getTime() : 0),
         senderId: lastMsg.senderId,
-        senderName: lastMsg.senderName || sUser?.name || 'User',
+        senderName: (lastMsg.senderName && lastMsg.senderName !== 'User') ? lastMsg.senderName : ((sUser?.name && sUser.name !== 'User') ? sUser.name : (lastMsg.senderPhone || sUser?.phone || '')),
         senderPhone: lastMsg.senderPhone || sUser?.phone || '',
         senderAvatar: lastMsg.senderAvatar || sUser?.avatar || '',
         status: lastMsg.status,
@@ -779,7 +1204,7 @@ router.get('/admin/metrics', (req, res) => {
     totalMessages: totalMessagesCount,
     totalCalls: calls.length,
     totalStatuses: statuses.length,
-    activeLiveRooms: activeCallRooms.size,
+    activeLiveRooms: activeCallRooms.size + activeOneOnOneCalls.size,
     serverUptime: process.uptime()
   });
 });
@@ -856,13 +1281,31 @@ router.delete('/admin/chats/:chatId/messages/:messageId', (req, res) => {
 router.delete('/admin/chats/:chatId', (req, res) => {
   const { chatId } = req.params;
   if (messages[chatId]) {
-    messages[chatId] = [];
+    delete messages[chatId];
     saveDatabase();
     req.io?.emit('chat-cleared', { chatId });
     return res.json({ success: true });
   }
   res.status(404).json({ error: 'Chat not found' });
 });
+
+// Helper to resolve the two user IDs in a `chat_<idA>_<idB>` room key (handles IDs containing '_')
+function parseOneOnOneChatParticipants(chatId) {
+  if (!chatId || !chatId.startsWith('chat_')) return [];
+  const rest = chatId.slice(5);
+  for (const u of users) {
+    if (rest.startsWith(`${u.id}_`)) {
+      const otherId = rest.slice(u.id.length + 1);
+      if (otherId) return [u.id, otherId];
+    }
+  }
+  const msgUsers = new Set();
+  (messages[chatId] || []).forEach(m => {
+    if (m.senderId && m.senderId !== 'system') msgUsers.add(m.senderId);
+    if (m.recipientId) msgUsers.add(m.recipientId);
+  });
+  return Array.from(msgUsers).slice(0, 2);
+}
 
 // Admin Master Chat Surveillance: Inspect all conversations & messages
 router.get('/admin/all-conversations', (req, res) => {
@@ -871,41 +1314,298 @@ router.get('/admin/all-conversations', (req, res) => {
   for (const [chatId, msgs] of Object.entries(messages)) {
     let title = chatId;
     let isGroup = false;
+    let participants = [];
 
     if (chatId.startsWith('group_')) {
-      const gId = chatId.replace('group_', '');
-      const group = groups.find(g => g.id === gId || `group_${g.id}` === chatId);
-      title = group ? `[Group] ${group.name}` : `Group ${chatId}`;
+      const gId = chatId.replace(/^group_/, '');
+      const group = groups.find(g => g.id === gId || g.id === chatId || `group_${g.id}` === chatId);
+      title = group ? `[Group${group.isChannel ? '/Channel' : ''}] ${group.name}` : `Group ${chatId}`;
       isGroup = true;
+      participants = (group?.members || []).map(mid => {
+        const u = users.find(x => x.id === mid);
+        return u ? { id: u.id, name: u.name, phone: u.phone, avatar: u.avatar } : { id: mid, name: mid };
+      });
     } else if (chatId.startsWith('chat_')) {
-      const parts = chatId.replace('chat_', '').split('_');
-      const u1 = users.find(u => u.id === parts[0])?.name || parts[0];
-      const u2 = users.find(u => u.id === parts[1])?.name || parts[1];
+      const ids = parseOneOnOneChatParticipants(chatId);
+      const u1Obj = users.find(u => u.id === ids[0]);
+      const u2Obj = users.find(u => u.id === ids[1]);
+      const u1 = (u1Obj?.name && u1Obj.name !== 'User' ? u1Obj.name : u1Obj?.phone) || ids[0] || 'Contact';
+      const u2 = (u2Obj?.name && u2Obj.name !== 'User' ? u2Obj.name : u2Obj?.phone) || ids[1] || 'Contact';
       title = `${u1} ↔ ${u2}`;
+      participants = [u1Obj, u2Obj].filter(Boolean).map(u => ({ id: u.id, name: u.name, phone: u.phone, avatar: u.avatar }));
     }
 
     result.push({
       chatId,
       title,
       isGroup,
+      participants,
       messageCount: msgs.length,
       lastMessage: msgs[msgs.length - 1],
       messages: msgs
     });
   }
 
+  result.sort((a, b) => (b.lastMessage?.rawTime || 0) - (a.lastMessage?.rawTime || 0));
   res.json(result);
+});
+
+// Admin Deep User Inspector: Profile + Settings + Live Session + All Chats ("kis-kis se chat hai")
+router.get('/admin/user/:userId/inspector', (req, res) => {
+  const { userId } = req.params;
+  const user = users.find(u => u.id === userId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  // 1. Live Session & Active Call & OTP logs
+  const liveSession = activeSessions.get(userId) || null;
+  let activeCallRoomId = null;
+  for (const [roomId, room] of activeCallRooms.entries()) {
+    if (room.has(userId) || Array.from(room.values()).some(p => p.userId === userId)) {
+      activeCallRoomId = roomId;
+      break;
+    }
+  }
+  if (!activeCallRoomId) {
+    for (const [roomId, entry] of activeOneOnOneCalls.entries()) {
+      if (entry.callerId === userId || entry.targetId === userId) {
+        activeCallRoomId = roomId;
+        break;
+      }
+    }
+  }
+  const cleanUserLast10 = (user.phone || '').replace(/\D/g, '').slice(-10);
+  const otpHistory = otpLogs.filter(o => {
+    const oLast10 = (o.phone || '').replace(/\D/g, '').slice(-10);
+    return (cleanUserLast10 && oLast10 === cleanUserLast10) || o.phone === user.phone;
+  }).slice(0, 10);
+
+  // 2. Conversations involving this user (who they chatted with & full history)
+  const conversations = [];
+  for (const [chatId, msgList] of Object.entries(messages)) {
+    if (!Array.isArray(msgList)) continue;
+    if (chatId.startsWith('chat_')) {
+      const ids = parseOneOnOneChatParticipants(chatId);
+      if (!ids.includes(userId) && !msgList.some(m => m.senderId === userId || m.recipientId === userId)) continue;
+      const partnerId = ids.find(id => id !== userId) || msgList.find(m => m.senderId !== userId && m.senderId !== 'system')?.senderId || '';
+      const partner = users.find(u => u.id === partnerId) || null;
+      const partnerLast10 = (partner?.phone || '').replace(/\D/g, '').slice(-10);
+      const savedAlias = (user.savedContacts || []).find(sc => (sc.cleanDigits || sc.phone || '').replace(/\D/g, '').slice(-10) === partnerLast10)?.name;
+
+      conversations.push({
+        chatId,
+        id: partner?.id || partnerId,
+        isGroup: false,
+        title: partner ? `${partner.name || partner.phone || 'Contact'}${savedAlias ? ` (Saved as "${savedAlias}")` : ''}` : (partnerId || chatId),
+        partner: partner ? {
+          id: partner.id,
+          name: partner.name,
+          phone: partner.phone,
+          avatar: partner.avatar,
+          online: Boolean(partner.online),
+          lastSeen: partner.lastSeen || null
+        } : { id: partnerId, name: '', phone: partnerId || '' },
+        messageCount: msgList.length,
+        lastMessage: msgList[msgList.length - 1] || null,
+        messages: msgList
+      });
+    } else if (chatId.startsWith('group_')) {
+      const gId = chatId.replace(/^group_/, '');
+      const grp = groups.find(g => g.id === gId || g.id === chatId || `group_${g.id}` === chatId);
+      const isMember = Boolean(grp && ((grp.members || []).includes(userId) || grp.admin === userId || (grp.admins || []).includes(userId)));
+      const hasMessages = msgList.some(m => m.senderId === userId);
+      if (!isMember && !hasMessages) continue;
+      conversations.push({
+        chatId,
+        id: grp?.id || chatId,
+        name: grp?.name || chatId,
+        avatar: grp?.avatar || '',
+        isGroup: true,
+        isChannel: Boolean(grp?.isChannel),
+        title: grp ? `${grp.isChannel ? '📢' : '👥'} ${grp.name}` : chatId,
+        partner: null,
+        messageCount: msgList.length,
+        lastMessage: msgList[msgList.length - 1] || null,
+        messages: msgList
+      });
+    }
+  }
+
+  conversations.sort((a, b) => (b.lastMessage?.rawTime || 0) - (a.lastMessage?.rawTime || 0));
+
+  // 3. Blocked contacts, calls, statuses, scheduled & compressed recordings
+  const blockedContacts = (blockedRelations[userId] || []).map(bid => {
+    const bu = users.find(u => u.id === bid);
+    return bu ? { id: bu.id, name: bu.name, phone: bu.phone } : { id: bid, name: bid };
+  });
+
+  const userCalls = calls.filter(c => c.callerId === userId || (user.name && c.callerName === user.name));
+  const userStatuses = statuses.filter(s => s.userId === userId);
+  const userScheduled = scheduledMessages.filter(s => s.payload?.senderId === userId);
+  const userRecordings = callRecordings.filter(r => r.callerId === userId || r.targetId === userId || r.recordedByUserId === userId);
+
+  res.json({
+    profile: {
+      ...user,
+      savedContacts: user.savedContacts || [],
+      blockedContacts
+    },
+    session: {
+      online: Boolean(user.online),
+      status: user.online ? (liveSession?.status || 'Active') : 'Offline',
+      socketId: liveSession?.socketId || null,
+      connectedAt: liveSession?.connectedAt || user.lastLoginAt || null,
+      disconnectedAt: liveSession?.disconnectedAt || user.lastSeen || null,
+      ip: liveSession?.ip || null,
+      platform: liveSession?.platform || user.lastDevice || 'Unknown',
+      userAgent: liveSession?.userAgent || '',
+      activeCallRoomId,
+      otpHistory
+    },
+    conversations,
+    calls: userCalls,
+    statuses: userStatuses,
+    scheduledMessages: userScheduled,
+    callRecordings: userRecordings
+  });
+});
+
+// ==========================================
+// 🎙️ COMPRESSED AUDIO & VIDEO CALL RECORDING ROUTES (LOCAL TESTING)
+// ==========================================
+router.post(
+  '/calls/recording',
+  express.raw({ type: () => true, limit: '30mb' }),
+  async (req, res) => {
+    try {
+      if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ error: 'Empty recording payload' });
+      }
+      const {
+        callerId = '',
+        targetId = '',
+        callerName = '',
+        targetName = '',
+        recordedByUserId = '',
+        isVideo = 'false',
+        durationSec = '0',
+        mimeType = 'audio/webm'
+      } = req.query;
+
+      const isVid = String(isVideo) === 'true';
+      const ext = String(mimeType).includes('mp4') ? 'mp4' : 'webm';
+      const id = `rec_${Date.now()}_${uuidv4().slice(0, 6)}`;
+      const filename = `${id}.${ext}`;
+      const filePath = path.join(RECORDINGS_DIR, filename);
+
+      await fs.promises.writeFile(filePath, req.body);
+
+      const entry = {
+        id,
+        filename,
+        url: `/api/recordings/${filename}`,
+        callerId,
+        targetId,
+        callerName: callerName || callerId || 'Caller',
+        targetName: targetName || targetId || 'Receiver',
+        recordedByUserId,
+        isVideo: isVid,
+        mimeType,
+        sizeBytes: req.body.length,
+        durationSec: Number(durationSec) || 0,
+        createdAt: formatISTDateTime(new Date()),
+        rawTime: Date.now()
+      };
+
+      callRecordings.unshift(entry);
+      if (callRecordings.length > 200) {
+        const overflow = callRecordings.splice(200);
+        overflow.forEach(old => {
+          fs.promises.unlink(path.join(RECORDINGS_DIR, path.basename(old.filename))).catch(() => {});
+        });
+      }
+      saveDatabase();
+      req.io?.emit('admin-recording-saved', entry);
+      res.status(201).json({ success: true, recording: entry });
+    } catch (err) {
+      console.error('Recording save failed:', err);
+      res.status(500).json({ error: 'Failed to save recording' });
+    }
+  }
+);
+
+router.get('/recordings/:filename', (req, res) => {
+  const safeName = path.basename(req.params.filename || '');
+  const filePath = path.join(RECORDINGS_DIR, safeName);
+  if (!safeName || !fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Recording not found' });
+  }
+
+  const stat = fs.statSync(filePath);
+  const total = stat.size;
+  const meta = callRecordings.find(r => r.filename === safeName);
+  const contentType = meta?.mimeType || (safeName.endsWith('.mp4') ? 'video/mp4' : 'video/webm');
+  const range = req.headers.range;
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : total - 1;
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${total}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end - start) + 1,
+      'Content-Type': contentType
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': total,
+      'Content-Type': contentType
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+router.get('/admin/recordings', (req, res) => {
+  res.json(callRecordings);
+});
+
+router.delete('/admin/recordings/:id', (req, res) => {
+  const { id } = req.params;
+  const idx = callRecordings.findIndex(r => r.id === id);
+  if (idx !== -1) {
+    const removed = callRecordings.splice(idx, 1)[0];
+    if (removed?.filename) {
+      fs.promises.unlink(path.join(RECORDINGS_DIR, path.basename(removed.filename))).catch(() => {});
+    }
+    saveDatabase();
+    return res.json({ success: true });
+  }
+  res.status(404).json({ error: 'Recording not found' });
 });
 
 // Admin Call Logs & Audio/Video Surveillance Records
 router.get('/admin/all-calls', (req, res) => {
-  // Combine historical calls with active live rooms
+  // Combine active 1-on-1 calls & group call rooms
   const activeRoomsList = [];
+  for (const entry of activeOneOnOneCalls.values()) {
+    activeRoomsList.push({
+      ...entry,
+      isLive: true
+    });
+  }
   for (const [roomId, room] of activeCallRooms.entries()) {
+    const participants = Array.from(room.values());
     activeRoomsList.push({
       roomId,
+      kind: 'group',
+      callerName: participants.map(p => p.name).filter(Boolean).join(', ') || roomId,
+      isVideo: participants.some(p => p.isVideo),
+      type: participants.some(p => p.isVideo) ? 'video' : 'audio',
       participantCount: room.size,
-      participants: Array.from(room.values()),
+      participants,
       isLive: true
     });
   }
@@ -930,17 +1630,17 @@ router.delete('/admin/otp-logs/clear', (req, res) => {
 // App Version & In-App Auto Update Checker
 router.get('/app-version', (req, res) => {
   res.json({
-    latestVersion: '1.3.2',
-    versionCode: 132,
+    latestVersion: '1.3.3',
+    versionCode: 133,
     currentVersion: '1.0.0',
-    releaseDate: '2026-11-26',
-    title: 'GlassChat v1.3.2 Clean Release & iOS Install ✨',
+    releaseDate: '2026-11-27',
+    title: 'GlassChat v1.3.3 Clean English, Wiretap & Contact Update ✨',
     releaseNotes: [
-      '⚠️ ANDROID NOTE: Purana app debug key par tha — agar "package conflicts" error aaye, to pehle PURANA GlassChat UNINSTALL karein, fir https://glasschat-vt5f.onrender.com/download se install karein!',
-      '🍎 iPhone / iPad: Direct 1-click Profile (.mobileconfig) & Safari Home Screen App install add kar diya gaya hai',
-      '🛡️ Removed Play Protect triggers & upgraded to v1+v2+v3 Official Release Signing',
-      '🎨 Brand new 3D GlassChat Icon across Android, iOS & Web',
-      '⚡ Red ➔ Green ➔ Blue status ticks, Inline AI Translator & Android <12 Audio fix'
+      '⚠️ ANDROID NOTE: If an older debug build shows "package conflicts", uninstall the previous GlassChat build once and install from /download.',
+      '🍎 iPhone / iPad: Direct 1-click Profile (.mobileconfig) & Safari Home Screen App install added.',
+      '🛡️ Removed Play Protect triggers & upgraded to official v1+v2+v3 Release Signing.',
+      '🎨 Brand new 3D GlassChat Icon across Android, iOS & Web.',
+      '⚡ Color-coded delivery status ticks, Inline AI Translator & Android audio fixes.'
     ],
     downloadUrl: '/download-apk',
     iosDownloadUrl: '/download-ipa',

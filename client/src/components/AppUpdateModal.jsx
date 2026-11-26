@@ -324,7 +324,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                   ⚡ iPhone Instant Live Update Ready
                 </div>
                 <p style={{ fontSize: '12px', color: '#047857', margin: '0 0 10px 0', lineHeight: '1.4' }}>
-                  Aap iPhone Home Screen app par hain. Koi `.ipa` download karne ki zarurat nahi — niche button dabate hi naya version load ho jayega!
+                  You are running GlassChat as an iPhone Home Screen app. No `.ipa` download needed — tap the button below to load the latest version instantly.
                 </p>
                 <button
                   onClick={handleInstantRefreshUpdate}
@@ -358,7 +358,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: '800', color: '#0284c7', marginBottom: '8px', fontSize: '13px' }}>
                   <Sparkles size={15} />
-                  <span>iPhone par Install kaise karein (100% Working)</span>
+                  <span>How to Install on iPhone</span>
                 </div>
 
                 {isNonSafariIos && (
@@ -372,14 +372,14 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                     fontWeight: '700',
                     marginBottom: '10px'
                   }}>
-                    ⚠️ Aap Safari browser mein nahi hain! iPhone par app install karne ke liye link copy karke <strong>Safari</strong> browser me kholein.
+                    ⚠️ You are not in Safari! Copy this link and open it in <strong>Safari</strong> to install on iPhone.
                   </div>
                 )}
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', color: 'var(--text-primary)' }}>
-                  <div><strong>Method A (1-Click Install Button):</strong> Niche <strong>"Install on iPhone"</strong> button dabaye ➔ <strong>Allow</strong> tap karein ➔ iPhone <strong>Settings ➔ Profile Downloaded ➔ Install</strong> par tap karein!</div>
+                  <div><strong>Method A (1-Click Install):</strong> Tap <strong>"Install on iPhone"</strong> below ➔ Tap <strong>Allow</strong> ➔ Open iPhone <strong>Settings ➔ Profile Downloaded ➔ Install</strong>.</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                    <strong>Method B (Safari):</strong> Safari ke <strong>Share</strong> icon (<Share size={13} style={{ display: 'inline', verticalAlign: 'middle' }} />) par tap karein ➔ <strong>"Add to Home Screen" ➔ "Add"</strong>.
+                    <strong>Method B (Safari):</strong> Tap Safari's <strong>Share</strong> icon (<Share size={13} style={{ display: 'inline', verticalAlign: 'middle' }} />) ➔ <strong>"Add to Home Screen" ➔ "Add"</strong>.
                   </div>
                 </div>
 
@@ -395,15 +395,15 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                     fontWeight: '700',
                     lineHeight: '1.4'
                   }}>
-                    ✅ Profile download trigger ho gaya hai!<br />
-                    1. Popup me <strong>"Allow"</strong> tap karein.<br />
-                    2. iPhone ki <strong>Settings</strong> app kholein.<br />
-                    3. Top par <strong>"Profile Downloaded" ➔ "Install"</strong> tap karte hi GlassChat icon Home Screen par aa jayega!
+                    ✅ Profile download triggered!<br />
+                    1. Tap <strong>"Allow"</strong> in the prompt.<br />
+                    2. Open your iPhone <strong>Settings</strong> app.<br />
+                    3. Tap <strong>"Profile Downloaded" ➔ "Install"</strong> to add GlassChat to your Home Screen.
                   </div>
                 )}
 
                 <p style={{ fontSize: '11px', color: '#0369a1', margin: '8px 0 10px 0', fontWeight: '600' }}>
-                  ✅ Dono tarikon se app bina Apple Developer fee ke full-screen chalegi aur har update automatic milega!
+                  ✅ Both methods install full-screen with automatic updates.
                 </p>
 
                 <button
@@ -460,7 +460,7 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
               {showDeveloperIpa && (
                 <div style={{ padding: '0 12px 12px 12px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
                   <p style={{ margin: '0 0 8px 0', color: '#b45309' }}>
-                    ⚠️ Apple bina paid Developer Certificate ke Safari/Files se direct `.ipa` install allow nahi karta. `.ipa` file sirf PC (Sideloadly / AltStore) ke through sign karke install karne ke liye hai.
+                    ⚠️ Apple does not allow direct `.ipa` sideloading from Safari without a paid Developer Certificate. The `.ipa` package is for PC signing tools (Sideloadly / AltStore).
                   </p>
                   <button
                     onClick={() => window.open(resolveDownloadUrl(updateInfo.iosDownloadUrl || '/download-ipa'), '_blank', 'noopener,noreferrer')}
@@ -499,9 +499,9 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 color: '#065f46'
               }}>
                 <strong>🛡️ Android Clean Update (v{updateInfo.latestVersion || '1.3.2'}):</strong><br />
-                1. Agar phone me purana debug build hai aur <strong>"package conflicts"</strong> error aaye, to pehle <strong>PURANA GlassChat UNINSTALL</strong> karke naya install karein (sirf 1 baar!).<br />
-                2. Isme Play Protect dropper flags hata diye gaye hain aur official v1+v2+v3 release key lagi hai.<br />
-                3. Sideload par Play Protect <strong>"Unknown developer"</strong> puche to <strong>More details ➔ Install anyway</strong> tap karein.
+                1. If an older debug build causes a <strong>"package conflicts"</strong> error, uninstall the previous GlassChat build once before installing.<br />
+                2. Play Protect-safe release signing (v1+v2+v3) is enabled.<br />
+                3. If prompted for <strong>"Unknown developer"</strong>, tap <strong>More details ➔ Install anyway</strong>.
               </div>
             )}
 
@@ -595,8 +595,8 @@ export default function AppUpdateModal({ updateInfo, onClose, currentVersion = '
                 </div>
                 <p style={{ fontSize: '12px', color: '#047857', margin: 0 }}>
                   {isCapacitorNative
-                    ? 'Browser se download complete hone par notification ya Downloads me APK tap karke install karein.'
-                    : 'Niche button par tap karke GlassChat.apk save & install karein.'}
+                    ? 'Once the browser download completes, open Downloads or tap the notification to install.'
+                    : 'Tap the button below to save and install GlassChat.apk.'}
                 </p>
               </div>
             )}

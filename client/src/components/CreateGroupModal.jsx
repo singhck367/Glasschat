@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
-import { X, Users, Check } from 'lucide-react';
+import { X, Users, Check, Megaphone } from 'lucide-react';
+import { resolveDisplayName } from '../utils/contacts';
 
 export default function CreateGroupModal({ 
   contacts, 
   onClose, 
-  onCreateGroup 
+  onCreateGroup,
+  savedContactsMap = {}
 }) {
   const [groupName, setGroupName] = useState('');
   const [groupDesc, setGroupDesc] = useState('');
   const [selectedContacts, setSelectedContacts] = useState([]);
+  const [isChannel, setIsChannel] = useState(false);
 
   const toggleContact = (userId) => {
     setSelectedContacts(prev => 
@@ -25,7 +28,8 @@ export default function CreateGroupModal({
     onCreateGroup({
       name: groupName.trim(),
       description: groupDesc.trim(),
-      members: selectedContacts
+      members: selectedContacts,
+      isChannel
     });
   };
 
@@ -101,10 +105,43 @@ export default function CreateGroupModal({
             type="text" 
             value={groupDesc} 
             onChange={(e) => setGroupDesc(e.target.value)}
-            placeholder="Group Description (optional)"
+            placeholder={isChannel ? "Channel Description (optional)" : "Group Description (optional)"}
             className="glass-input"
             style={{ fontSize: '13px', padding: '10px 14px' }}
           />
+
+          {/* Announcement Channel Toggle */}
+          <label
+            onClick={() => setIsChannel(!isChannel)}
+            className="glass-card"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '9px 12px',
+              cursor: 'pointer',
+              backgroundColor: isChannel ? 'rgba(139, 92, 246, 0.12)' : undefined,
+              borderColor: isChannel ? '#8b5cf6' : undefined
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Megaphone size={16} color="#8b5cf6" />
+              <div>
+                <div style={{ fontSize: '12px', fontWeight: '700', color: 'var(--text-primary)' }}>
+                  Announcement Channel Mode
+                </div>
+                <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                  Only admins can post messages; members can read and react
+                </div>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={isChannel}
+              onChange={(e) => setIsChannel(e.target.checked)}
+              style={{ width: '16px', height: '16px', accentColor: '#8b5cf6' }}
+            />
+          </label>
 
           {/* Members Selection List */}
           <div style={{ marginTop: '8px' }}>
@@ -136,10 +173,10 @@ export default function CreateGroupModal({
                       />
                       <div>
                         <h4 style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', margin: 0 }}>
-                          {contact.name}
+                          {resolveDisplayName(contact, savedContactsMap, true)}
                         </h4>
                         <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: 0 }}>
-                          {contact.status}
+                          {contact.phone || contact.status}
                         </p>
                       </div>
                     </div>

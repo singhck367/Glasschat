@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { socket } from './services/socket';
-import { notifyIncomingMessage } from './services/notifications';
+import { socket, registerSocketUser } from './services/socket';
+import {
+  notifyIncomingMessage,
+  notifyUrgentSos,
+  requestNotificationPermission,
+  startReminderWatcher
+} from './services/notifications';
 import NavigationHeader from './components/NavigationHeader';
 import BottomTabBar from './components/BottomTabBar';
 import ChatListItem from './components/ChatListItem';
@@ -16,12 +21,15 @@ import SettingsScreen from './components/SettingsScreen';
 import StatusScreen from './components/StatusScreen';
 import AuthScreen from './components/AuthScreen';
 import AppUpdateModal from './components/AppUpdateModal';
-import { Smartphone, Monitor } from 'lucide-react';
+import SosModal from './components/SosModal';
+import { Smartphone, Monitor, Bell } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { formatISTTime } from './utils/time';
+import { resolveDisplayName, isSavedNumber } from './utils/contacts';
+import { flushOfflineQueue } from './utils/offlineQueue';
 
-export const APP_VERSION = '1.3.2';
-export const APP_VERSION_CODE = 132;
+export const APP_VERSION = '1.3.3';
+export const APP_VERSION_CODE = 133;
 
 // Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
 function isVersionGreater(remoteVer, currentVer) {
@@ -60,8 +68,48 @@ export default function App() {
   // Modals & In-App Updates
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
+  const [isSosOpen, setIsSosOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(window.location.hash === '#admin');
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [typingChats, setTypingChats] = useState({});
+  const [activeReminderBanner, setActiveReminderBanner] = useState(null);
+  const [appTheme, setAppTheme] = useState(() => localStorage.getItem('glasschat_theme') || 'light');
+  const [chatTransparency, setChatTransparency] = useState(() => {
+    const saved = localStorage.getItem('glasschat_bubble_transparency');
+    return saved !== null ? Number(saved) : 100; // Default 100% transparent background & border
+  });
+
+  const applyTransparencyCssVars = (pct) => {
+    const safePct = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 100));
+    const opacityRatio = (100 - safePct) / 100;
+    const bgAlpha = (opacityRatio * 0.72).toFixed(2);
+    const borderAlpha = (opacityRatio * 0.78).toFixed(2);
+    document.documentElement.style.setProperty('--msg-bg-opacity', bgAlpha);
+    document.documentElement.style.setProperty('--msg-border-opacity', borderAlpha);
+    document.documentElement.style.setProperty('--msg-shadow', opacityRatio > 0.15 ? 'var(--glass-shadow-sm)' : 'none');
+  };
+
+  const handleChangeChatTransparency = (pct) => {
+    const clean = Math.max(0, Math.min(100, Number(pct)));
+    setChatTransparency(clean);
+    localStorage.setItem('glasschat_bubble_transparency', String(clean));
+    applyTransparencyCssVars(clean);
+  };
+
+  const handleApplyTheme = (nextTheme) => {
+    const clean = nextTheme || 'light';
+    setAppTheme(clean);
+    localStorage.setItem('glasschat_theme', clean);
+    document.documentElement.setAttribute('data-theme', clean);
+  };
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', appTheme);
+  }, [appTheme]);
+
+  useEffect(() => {
+    applyTransparencyCssVars(chatTransparency);
+  }, [chatTransparency]);
 
   // Navigation & Back-Button Safety Refs
   const activeTabRef = useRef(activeTab);
@@ -240,6 +288,10 @@ export default function App() {
     }
     setSavedContactsMap(map);
   };
+  const savedContactsMapRef = useRef({});
+  useEffect(() => {
+    savedContactsMapRef.current = savedContactsMap;
+  }, [savedContactsMap]);
 
   const loadUserData = (userId) => {
     // Contacts
@@ -292,12 +344,26 @@ export default function App() {
       try {
         const parsed = JSON.parse(savedUser);
         setCurrentUser(parsed);
-        socket.emit('register-user', { userId: parsed.id });
+        registerSocketUser(parsed.id);
         loadUserData(parsed.id);
       } catch (e) {
         localStorage.removeItem('glasschat_user');
       }
     }
+
+    // Offline Sync Queue Flush on Socket Reconnect or Browser Online
+    const handleConnectOrOnline = () => {
+      flushOfflineQueue(socket);
+    };
+    socket.on('connect', handleConnectOrOnline);
+    window.addEventListener('online', handleConnectOrOnline);
+    if (socket.connected) flushOfflineQueue(socket);
+
+    // Smart Reminder Scheduler Watcher
+    const stopReminders = startReminderWatcher((rem) => {
+      setActiveReminderBanner(rem);
+      setTimeout(() => setActiveReminderBanner(null), 8000);
+    });
 
     // Check for in-app updates or direct /download /install route on startup
     const path = window.location.pathname.toLowerCase();
@@ -307,17 +373,29 @@ export default function App() {
       checkForAppUpdates(false);
     }
 
-    return () => window.removeEventListener('hashchange', handleHash);
+    return () => {
+      window.removeEventListener('hashchange', handleHash);
+      socket.off('connect', handleConnectOrOnline);
+      window.removeEventListener('online', handleConnectOrOnline);
+      stopReminders();
+    };
   }, []);
 
-  // Multi-Device Auto-Sync: Refresh contacts periodically and when window is focused
+  // Multi-Device Auto-Sync: Gentle background refresh (socket handles instant live delivery)
+  const lastFocusSyncRef = useRef(0);
   useEffect(() => {
     if (!currentUser?.id) return;
     const interval = setInterval(() => {
       loadUserData(currentUser.id);
-    }, 20000);
+    }, 60000);
 
-    const handleFocus = () => loadUserData(currentUser.id);
+    const handleFocus = () => {
+      const now = Date.now();
+      if (now - lastFocusSyncRef.current > 15000) {
+        lastFocusSyncRef.current = now;
+        loadUserData(currentUser.id);
+      }
+    };
     window.addEventListener('focus', handleFocus);
 
     return () => {
@@ -353,9 +431,9 @@ export default function App() {
       setContacts(prev => prev.map(c => c.id === userId ? { ...c, online } : c));
     };
 
-    // When someone creates a second account or updates their profile
+    // Only add newly registered users if already saved in phonebook (strict privacy)
     const handleNewUser = (newUser) => {
-      if (newUser.id !== currentUser?.id) {
+      if (newUser.id !== currentUser?.id && isSavedNumber(newUser.phone, savedContactsMapRef.current)) {
         setContacts(prev => {
           if (prev.some(u => u.id === newUser.id)) {
             return prev.map(u => u.id === newUser.id ? newUser : u);
@@ -370,11 +448,8 @@ export default function App() {
         setCurrentUser(updatedUser);
       }
       setContacts(prev => {
-        const exists = prev.some(u => u.id === updatedUser.id);
-        if (exists) {
-          return prev.map(u => u.id === updatedUser.id ? updatedUser : u);
-        }
-        return [updatedUser, ...prev];
+        if (!prev.some(u => u.id === updatedUser.id)) return prev;
+        return prev.map(u => u.id === updatedUser.id ? updatedUser : u);
       });
     };
 
@@ -433,12 +508,12 @@ export default function App() {
 
         const isViewingThisChat = activeChatKey === chatId || activeChat?.id === message.senderId;
 
-        // Display sender phone prominently
-        const senderDisplay = message.senderPhone 
-          ? (message.senderName && message.senderName !== message.senderPhone 
-              ? `${message.senderPhone} (~${message.senderName})` 
-              : message.senderPhone)
-          : message.senderName;
+        // Resolve sender display strictly using saved phonebook name if saved, else phone
+        const senderDisplay = resolveDisplayName(
+          { name: message.senderName, phone: message.senderPhone },
+          savedContactsMapRef.current,
+          true
+        );
 
         // If user is NOT viewing this chat right now: increment unread & notify!
         if (!isViewingThisChat) {
@@ -448,8 +523,12 @@ export default function App() {
             [message.senderId]: (prev[message.senderId] || 0) + 1
           }));
 
-          // Play message sound chime, vibrate, and show system notification
-          notifyIncomingMessage(senderDisplay, message.text);
+          // Play urgent SOS or message chime + system tray notification
+          if (message.isSos) {
+            notifyUrgentSos(senderDisplay, message.text);
+          } else {
+            notifyIncomingMessage(senderDisplay, message.text, chatId);
+          }
 
           setIncomingAlert({
             senderName: senderDisplay,
@@ -459,9 +538,17 @@ export default function App() {
             text: message.text,
             chatId
           });
-          setTimeout(() => setIncomingAlert(null), 4000);
+          setTimeout(() => setIncomingAlert(null), 5000);
         }
       }
+    };
+
+    const handleGlobalTyping = (payload) => {
+      if (!payload?.chatId || payload.userId === currentUser?.id) return;
+      setTypingChats(prev => ({
+        ...prev,
+        [payload.chatId]: payload.isTyping ? (payload.userName || 'Typing') : ''
+      }));
     };
 
     const handleMessageAlert = (alertData) => {
@@ -504,6 +591,7 @@ export default function App() {
     socket.on('user-updated', handleUserUpdated);
     socket.on('new-group-created', handleNewGroup);
     socket.on('new-message', handleGlobalMessage);
+    socket.on('user-typing', handleGlobalTyping);
     socket.on('incoming-message-alert', handleMessageAlert);
     socket.on('contacts-synced', handleContactsSynced);
 
@@ -515,6 +603,7 @@ export default function App() {
       socket.off('user-updated', handleUserUpdated);
       socket.off('new-group-created', handleNewGroup);
       socket.off('new-message', handleGlobalMessage);
+      socket.off('user-typing', handleGlobalTyping);
       socket.off('incoming-message-alert', handleMessageAlert);
       socket.off('contacts-synced', handleContactsSynced);
     };
@@ -564,8 +653,9 @@ export default function App() {
   const handleLoginSuccess = (user) => {
     localStorage.setItem('glasschat_user', JSON.stringify(user));
     setCurrentUser(user);
-    socket.emit('register-user', { userId: user.id });
+    registerSocketUser(user.id);
     loadUserData(user.id);
+    requestNotificationPermission();
   };
 
   // Handle Logout
@@ -775,12 +865,20 @@ export default function App() {
   const cleanSearch = searchQuery.trim().toLowerCase();
   const cleanDigits = searchQuery.replace(/\D/g, '');
 
+  // Helper to resolve partner user ID from `chat_<idA>_<idB>` cleanly (even when IDs contain '_')
+  const extractPartnerId = (cId, selfId) => {
+    if (!cId || !selfId || !cId.startsWith('chat_')) return '';
+    const rest = cId.slice(5);
+    if (rest.startsWith(`${selfId}_`)) return rest.slice(selfId.length + 1);
+    if (rest.endsWith(`_${selfId}`)) return rest.slice(0, rest.length - selfId.length - 1);
+    return '';
+  };
+
   // 1. Collect all active 1-on-1 chat participants from chatSummaries and unread counts
   const activeChatUsersMap = new Map();
   Object.entries(chatSummaries).forEach(([cId, summary]) => {
-    if (cId.startsWith('chat_') && cId.includes(currentUser?.id) && Boolean(summary?.lastMessage)) {
-      const parts = cId.replace('chat_', '').split('_');
-      const otherId = parts.find(id => id !== currentUser?.id);
+    if (cId.startsWith('chat_') && currentUser?.id && Boolean(summary?.lastMessage)) {
+      const otherId = extractPartnerId(cId, currentUser.id);
       if (otherId) {
         activeChatUsersMap.set(otherId, { cChatId: cId, summary });
       }
@@ -789,9 +887,8 @@ export default function App() {
 
   Object.entries(unreadCounts).forEach(([key, count]) => {
     if (count > 0 && key !== currentUser?.id) {
-      if (key.startsWith('chat_') && key.includes(currentUser?.id)) {
-        const parts = key.replace('chat_', '').split('_');
-        const otherId = parts.find(id => id !== currentUser?.id);
+      if (key.startsWith('chat_') && currentUser?.id) {
+        const otherId = extractPartnerId(key, currentUser.id);
         if (otherId && !activeChatUsersMap.has(otherId)) {
           activeChatUsersMap.set(otherId, { cChatId: key, summary: chatSummaries[key] });
         }
@@ -810,7 +907,7 @@ export default function App() {
     if (!all1on1Candidates.some(c => c.id === otherId)) {
       all1on1Candidates.push({
         id: otherId,
-        name: summary?.senderId === otherId ? summary?.senderName : 'User',
+        name: summary?.senderId === otherId && summary?.senderName && summary.senderName !== 'User' ? summary.senderName : (summary?.senderPhone || ''),
         phone: summary?.senderPhone || '',
         avatar: summary?.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
         status: 'Available',
@@ -836,13 +933,15 @@ export default function App() {
     }),
     ...all1on1Candidates
       .filter(c => {
-        // If searching in top bar, allow finding any matching user
-        if (cleanSearch) return true;
-        // On home screen: ONLY show users who have an active conversation history or unread messages
         const cChatId = `chat_${[currentUser?.id, c.id].sort().join('_')}`;
         const summary = chatSummaries[cChatId];
         const unread = unreadCounts[cChatId] || unreadCounts[c.id] || 0;
-        return activeChatUsersMap.has(c.id) || Boolean(summary?.lastMessage) || unread > 0;
+        const hasChat = activeChatUsersMap.has(c.id) || Boolean(summary?.lastMessage) || unread > 0;
+        // If searching in top bar, ONLY allow saved contacts or active chat history (strict privacy)
+        if (cleanSearch) {
+          return hasChat || isSavedNumber(c.phone, savedContactsMap);
+        }
+        return hasChat;
       })
       .map(c => {
         const cChatId = `chat_${[currentUser?.id, c.id].sort().join('_')}`;
@@ -882,7 +981,8 @@ export default function App() {
 
   const filteredChats = baseChats.filter(chat => {
     if (!cleanSearch) return true;
-    const nameMatch = chat.name?.toLowerCase().includes(cleanSearch);
+    const resolvedName = resolveDisplayName(chat, savedContactsMap, true).toLowerCase();
+    const nameMatch = chat.name?.toLowerCase().includes(cleanSearch) || resolvedName.includes(cleanSearch);
     const phoneRawMatch = chat.phone?.toLowerCase().includes(cleanSearch);
     const chatDigits = (chat.phone || '').replace(/\D/g, '');
     const phoneDigitsMatch = cleanDigits.length > 0 && chatDigits.includes(cleanDigits);
@@ -1075,6 +1175,7 @@ export default function App() {
             socket={socket}
             savedContactsMap={savedContactsMap}
             onSaveContact={handleSaveContact}
+            onOpenSos={() => setIsSosOpen(true)}
           />
         ) : (
           /* Main Navigation View */
@@ -1088,6 +1189,7 @@ export default function App() {
               onOpenAdmin={() => setIsAdminOpen(true)}
               onOpenSettings={() => setActiveTab('settings')}
               onOpenInstall={() => checkForAppUpdates(true)}
+              onOpenSos={() => setIsSosOpen(true)}
               activeTab={activeTab}
             />
 
@@ -1139,16 +1241,22 @@ export default function App() {
                     overflowY: 'auto',
                     flex: 1
                   }}>
-                    {filteredChats.map((chat) => (
-                      <ChatListItem
-                        key={chat.id}
-                        chat={chat}
-                        onSelectChat={handleSelectChat}
-                        onStartCall={handleStartCall}
-                        currentUser={currentUser}
-                        savedContactsMap={savedContactsMap}
-                      />
-                    ))}
+                    {filteredChats.map((chat) => {
+                      const cKey = chat.isGroup
+                        ? (chat.id.startsWith('group_') ? chat.id : `group_${chat.id}`)
+                        : `chat_${[currentUser?.id, chat.id].sort().join('_')}`;
+                      return (
+                        <ChatListItem
+                          key={chat.id}
+                          chat={chat}
+                          onSelectChat={handleSelectChat}
+                          onStartCall={handleStartCall}
+                          currentUser={currentUser}
+                          savedContactsMap={savedContactsMap}
+                          typingText={typingChats[cKey] ? 'typing...' : ''}
+                        />
+                      );
+                    })}
                     {filteredChats.length === 0 && (
                       <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-secondary)' }}>
                         <p style={{ fontSize: '14px', fontWeight: '500' }}>No conversations found</p>
@@ -1176,6 +1284,8 @@ export default function App() {
                 <StatusScreen 
                   currentUser={currentUser}
                   socket={socket}
+                  savedContactsMap={savedContactsMap}
+                  contacts={contacts}
                 />
               )}
 
@@ -1183,6 +1293,7 @@ export default function App() {
                 <CallsList 
                   calls={calls}
                   contacts={contacts}
+                  savedContactsMap={savedContactsMap}
                   onStartCall={handleStartCall}
                   searchQuery={searchQuery}
                 />
@@ -1192,12 +1303,18 @@ export default function App() {
                 <SettingsScreen 
                   currentUser={currentUser} 
                   contacts={contacts}
+                  savedContactsMap={savedContactsMap}
                   onLogout={handleLogout}
                   onOpenAdmin={() => setIsAdminOpen(true)}
                   onUpdateAvatar={handleUpdateAvatar}
                   onUpdateUser={setCurrentUser}
                   onCheckForUpdates={() => checkForAppUpdates(true)}
                   appVersion={APP_VERSION}
+                  appTheme={appTheme}
+                  onApplyTheme={handleApplyTheme}
+                  chatTransparency={chatTransparency}
+                  onChangeChatTransparency={handleChangeChatTransparency}
+                  onOpenSos={() => setIsSosOpen(true)}
                 />
               )}
             </div>
@@ -1244,13 +1361,66 @@ export default function App() {
           />
         )}
 
-        {/* Create Group Modal */}
+        {/* Create Group / Channel Modal */}
         {isCreateGroupOpen && (
           <CreateGroupModal
             contacts={contacts}
+            savedContactsMap={savedContactsMap}
             onClose={() => setIsCreateGroupOpen(false)}
             onCreateGroup={handleCreateGroup}
           />
+        )}
+
+        {/* Emergency SOS Modal */}
+        {isSosOpen && (
+          <SosModal
+            currentUser={currentUser}
+            savedContacts={savedContacts}
+            savedContactsMap={savedContactsMap}
+            onClose={() => setIsSosOpen(false)}
+            onUserUpdate={setCurrentUser}
+          />
+        )}
+
+        {/* Due Smart Reminder Banner */}
+        {activeReminderBanner && (
+          <div style={{
+            position: 'fixed',
+            top: 'max(14px, env(safe-area-inset-top, 14px))',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 9998,
+            width: 'calc(100% - 32px)',
+            maxWidth: '410px',
+            padding: '12px 16px',
+            borderRadius: '20px',
+            backgroundColor: 'rgba(15, 23, 42, 0.94)',
+            color: '#ffffff',
+            boxShadow: '0 12px 32px rgba(0, 0, 0, 0.35)',
+            border: '1px solid rgba(56, 189, 248, 0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '10px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+              <Bell size={18} color="#38bdf8" />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '12px', fontWeight: '800', color: '#38bdf8' }}>
+                  ⏰ Reminder: {activeReminderBanner.title}
+                </div>
+                <div style={{ fontSize: '11px', color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {activeReminderBanner.sourceText || activeReminderBanner.chatName}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => setActiveReminderBanner(null)}
+              style={{ background: 'none', border: 'none', color: '#94a3b8', fontWeight: '800', cursor: 'pointer', fontSize: '12px' }}
+            >
+              OK
+            </button>
+          </div>
         )}
 
         {/* New Chat / All Contacts Directory Modal */}

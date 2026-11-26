@@ -1,22 +1,24 @@
 import React from 'react';
-import { Phone, Video, CheckCheck, Check, Users } from 'lucide-react';
+import { Phone, Video, CheckCheck, Check, Users, Megaphone } from 'lucide-react';
 import { formatChatTimestamp } from '../utils/time';
+import { lookupSavedName } from '../utils/contacts';
 
 export default function ChatListItem({ 
   chat, 
   onSelectChat, 
   onStartCall, 
   currentUser,
-  savedContactsMap = {}
+  savedContactsMap = {},
+  typingText = '',
+  hideCallButtons = false
 }) {
   const isGroup = Boolean(chat.isGroup);
+  const isChannel = Boolean(chat.isChannel);
   const lastMessage = chat.lastMessage || 'Tap to start conversation';
   const timestamp = formatChatTimestamp(chat.rawTime || chat.createdAt || chat.timestamp);
   const isOnline = Boolean(chat.online);
 
-  const cleanPhoneDigits = (chat.phone || '').replace(/\D/g, '');
-  const last10Digits = cleanPhoneDigits.slice(-10);
-  const savedContactName = !isGroup ? (savedContactsMap[last10Digits] || savedContactsMap[cleanPhoneDigits] || '') : '';
+  const savedContactName = !isGroup ? lookupSavedName(chat.phone, savedContactsMap) : '';
 
   return (
     <div 
@@ -57,7 +59,11 @@ export default function ChatListItem({
             display: 'flex',
             boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
           }}>
-            <Users size={12} color="#0284c7" />
+            {isChannel ? (
+              <Megaphone size={12} color="#8b5cf6" />
+            ) : (
+              <Users size={12} color="#0284c7" />
+            )}
           </span>
         ) : isOnline && (
           <span style={{
@@ -95,14 +101,14 @@ export default function ChatListItem({
             ) : chat.phone ? (
               <>
                 <span style={{ fontWeight: '800', color: 'var(--text-primary)' }}>{chat.phone}</span>
-                {chat.name && chat.name !== chat.phone && (
+                {chat.name && chat.name !== chat.phone && chat.name.trim().toLowerCase() !== 'user' && (
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>
                     ~{chat.name}
                   </span>
                 )}
               </>
             ) : (
-              chat.name || 'User'
+              (chat.name && chat.name.trim().toLowerCase() !== 'user' ? chat.name : 'Unknown')
             )}
           </h3>
           <span style={{ 
@@ -116,7 +122,7 @@ export default function ChatListItem({
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', minWidth: 0, flex: 1 }}>
-            {chat.lastMessageSenderId === currentUser?.id && (
+            {!typingText && chat.lastMessageSenderId === currentUser?.id && (
               chat.lastMessageStatus === 'seen' || chat.lastMessageStatus === 'read' ? (
                 <CheckCheck size={14} color="#34B7F1" />
               ) : chat.lastMessageStatus === 'delivered' ? (
@@ -127,14 +133,14 @@ export default function ChatListItem({
             )}
             <p style={{
               fontSize: '13px',
-              color: chat.unreadCount > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
-              fontWeight: chat.unreadCount > 0 ? '600' : '400',
+              color: typingText ? '#16a34a' : (chat.unreadCount > 0 ? 'var(--text-primary)' : 'var(--text-secondary)'),
+              fontWeight: typingText ? '700' : (chat.unreadCount > 0 ? '600' : '400'),
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               margin: 0
             }}>
-              {lastMessage}
+              {typingText || lastMessage}
             </p>
           </div>
 
@@ -162,29 +168,31 @@ export default function ChatListItem({
         </div>
       </div>
 
-      {/* Quick Call Actions */}
-      <div 
-        style={{ display: 'flex', gap: '6px', marginLeft: '6px' }}
-        onClick={(e) => e.stopPropagation()} // Prevent opening chat when tapping call
-      >
-        <button
-          onClick={() => onStartCall(chat, false)} // Audio Call
-          className="glass-btn"
-          style={{ width: '34px', height: '34px' }}
-          title={isGroup ? "Start Group Audio Call" : "Start Audio Call"}
+      {/* Quick Call Actions (hidden inside read-only Admin mirror) */}
+      {!hideCallButtons && (
+        <div 
+          style={{ display: 'flex', gap: '6px', marginLeft: '6px' }}
+          onClick={(e) => e.stopPropagation()} // Prevent opening chat when tapping call
         >
-          <Phone size={15} color="#0284c7" />
-        </button>
+          <button
+            onClick={() => onStartCall?.(chat, false)} // Audio Call
+            className="glass-btn"
+            style={{ width: '34px', height: '34px' }}
+            title={isGroup ? "Start Group Audio Call" : "Start Audio Call"}
+          >
+            <Phone size={15} color="#0284c7" />
+          </button>
 
-        <button
-          onClick={() => onStartCall(chat, true)} // Video Call
-          className="glass-btn"
-          style={{ width: '34px', height: '34px' }}
-          title={isGroup ? "Start Group Video Call" : "Start Video Call"}
-        >
-          <Video size={15} color="#0284c7" />
-        </button>
-      </div>
+          <button
+            onClick={() => onStartCall?.(chat, true)} // Video Call
+            className="glass-btn"
+            style={{ width: '34px', height: '34px' }}
+            title={isGroup ? "Start Group Video Call" : "Start Video Call"}
+          >
+            <Video size={15} color="#0284c7" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

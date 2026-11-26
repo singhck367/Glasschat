@@ -4,8 +4,17 @@ import {
   Trash2, Clock, Check, Sparkles, ChevronUp, CheckCheck
 } from 'lucide-react';
 import { formatChatTimestamp, formatISTTime } from '../utils/time';
+import { resolveDisplayName } from '../utils/contacts';
 
-export default function StatusScreen({ currentUser, socket }) {
+export default function StatusScreen({ currentUser, socket, savedContactsMap = {}, contacts = [] }) {
+  const getAuthorName = (id, rawName, rawPhone) => {
+    const matched = contacts.find(c => c.id === id);
+    return resolveDisplayName(
+      { name: matched?.name || rawName, phone: matched?.phone || rawPhone },
+      savedContactsMap,
+      true
+    );
+  };
   const [statuses, setStatuses] = useState([]);
   const [activeStoryGroup, setActiveStoryGroup] = useState(null); // array of stories for selected user
   const [activeStoryIndex, setActiveStoryIndex] = useState(0);
@@ -86,7 +95,7 @@ export default function StatusScreen({ currentUser, socket }) {
       if (!acc[st.userId]) {
         acc[st.userId] = {
           userId: st.userId,
-          userName: st.userName,
+          userName: getAuthorName(st.userId, st.userName, st.userPhone),
           userAvatar: st.userAvatar,
           stories: []
         };
@@ -660,7 +669,13 @@ export default function StatusScreen({ currentUser, socket }) {
               />
               <div>
                 <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '700' }}>
-                  {activeStoryGroup[activeStoryIndex]?.userName}
+                  {activeStoryGroup[activeStoryIndex]?.userId === currentUser?.id
+                    ? 'My Status'
+                    : getAuthorName(
+                        activeStoryGroup[activeStoryIndex]?.userId,
+                        activeStoryGroup[activeStoryIndex]?.userName,
+                        activeStoryGroup[activeStoryIndex]?.userPhone
+                      )}
                 </h4>
                 <span style={{ fontSize: '11px', opacity: 0.75 }}>
                   {formatChatTimestamp(activeStoryGroup[activeStoryIndex]?.createdAt || activeStoryGroup[activeStoryIndex]?.timestamp || 'Recent')}
@@ -928,7 +943,7 @@ export default function StatusScreen({ currentUser, socket }) {
                       />
                       <div>
                         <h4 style={{ fontSize: '14px', fontWeight: '700', margin: 0, color: 'var(--text-primary)' }}>
-                          {viewer.userName}
+                          {getAuthorName(viewer.userId, viewer.userName, viewer.userPhone)}
                         </h4>
                         <span style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'block', marginTop: '2px' }}>
                           {viewer.userPhone || 'Registered contact'}

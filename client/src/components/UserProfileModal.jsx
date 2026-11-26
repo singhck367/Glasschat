@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { 
   X, Phone, Video, MessageSquare, ShieldCheck, 
   Calendar, Mail, Phone as PhoneIcon, User, Info, 
-  Lock, Eye, EyeOff, CheckCircle2, UserPlus, Edit3, Check
+  Lock, Eye, EyeOff, CheckCircle2, UserPlus, Edit3, Check,
+  Ban, Flag
 } from 'lucide-react';
 import { formatLastSeen } from '../utils/time';
+import { resolveDisplayName } from '../utils/contacts';
 
 export default function UserProfileModal({ 
   user, 
@@ -14,18 +16,26 @@ export default function UserProfileModal({
   onStartChat,
   onVerifySecurity,
   savedContactsMap = {},
-  onSaveContact
+  onSaveContact,
+  onBlockChange
 }) {
   const [profileData, setProfileData] = useState(user);
   const [loading, setLoading] = useState(true);
   const [showFullPhoto, setShowFullPhoto] = useState(false);
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [blockLoading, setBlockLoading] = useState(false);
+  const [showReportBox, setShowReportBox] = useState(false);
+  const [reportReason, setReportReason] = useState('Spam');
+  const [reportDetails, setReportDetails] = useState('');
+  const [reportFeedback, setReportFeedback] = useState('');
 
   // Contact name save state
   const cleanDigits = (profileData?.phone || user?.phone || '').replace(/\D/g, '');
   const last10 = cleanDigits.slice(-10);
   const existingSavedName = savedContactsMap[last10] || savedContactsMap[cleanDigits] || '';
+  const displayName = resolveDisplayName(profileData || user, savedContactsMap, true);
   
-  const [customNameInput, setCustomNameInput] = useState(existingSavedName || (profileData?.name && profileData.name !== profileData.phone ? profileData.name : ''));
+  const [customNameInput, setCustomNameInput] = useState(existingSavedName || '');
   const [isEditingContact, setIsEditingContact] = useState(!existingSavedName);
   const [saveStatus, setSaveStatus] = useState('');
 
@@ -73,7 +83,70 @@ export default function UserProfileModal({
       })
       .catch(e => console.error('Failed to fetch user profile:', e))
       .finally(() => setLoading(false));
+
+    if (currentUser?.id) {
+      fetch(`/api/contacts/blocked?userId=${currentUser.id}`)
+        .then(r => r.json())
+        .then(list => {
+          if (Array.isArray(list)) {
+            setIsBlocked(list.includes(user.id));
+          }
+        })
+        .catch(() => {});
+    }
   }, [user?.id, currentUser?.id]);
+
+  const handleToggleBlock = async () => {
+    if (!currentUser?.id || !user?.id || blockLoading) return;
+    setBlockLoading(true);
+    try {
+      const res = await fetch('/api/contacts/block', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.id, targetUserId: user.id })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setIsBlocked(Boolean(data.blocked));
+        onBlockChange?.(data.blockedList || []);
+      }
+    } catch (e) {
+      console.error('Block toggle error:', e);
+    } finally {
+      setBlockLoading(false);
+    }
+  };
+
+  const handleSubmitReport = async (e) => {
+    e?.preventDefault();
+    if (!currentUser?.id || !user?.id) return;
+    setReportFeedback('Sending report...');
+    try {
+      const res = await fetch('/api/contacts/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reporterId: currentUser.id,
+          targetUserId: user.id,
+          reason: reportReason,
+          details: reportDetails.trim()
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setReportFeedback('✅ Report submitted to moderation team');
+        setTimeout(() => {
+          setShowReportBox(false);
+          setReportFeedback('');
+          setReportDetails('');
+        }, 1600);
+      } else {
+        setReportFeedback(data.error || 'Report failed');
+      }
+    } catch (err) {
+      setReportFeedback('Network error');
+    }
+  };
 
   return (
     <div style={{
@@ -148,9 +221,9 @@ export default function UserProfileModal({
 
           <div>
             <h2 style={{ fontSize: '20px', fontWeight: '800', color: 'var(--text-primary)', margin: 0 }}>
-              {existingSavedName || profileData?.name || 'User'}
+              {displayName}
             </h2>
-            {existingSavedName && profileData?.name && profileData.name !== existingSavedName && (
+            {existingSavedName && profileData?.name && profileData.name !== existingSavedName && profileData.name.trim().toLowerCase() !== 'user' && (
               <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>
                 ~{profileData.name}
               </span>
@@ -383,6 +456,90 @@ export default function UserProfileModal({
               </p>
             </div>
           </div>
+
+          {/* Safety Controls: Block & Report */}
+          <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+            <button
+              type="button"
+              onClick={handleToggleBlock}
+              disabled={blockLoading}
+              className="glass-btn"
+              style={{
+                flex: 1,
+                height: '40px',
+                borderRadius: '14px',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: '700',
+                color: isBlocked ? '#16a34a' : '#ef4444',
+                borderColor: isBlocked ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)',
+                backgroundColor: isBlocked ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)'
+              }}
+            >
+              <Ban size={15} />
+              <span>{blockLoading ? '...' : isBlocked ? 'Unblock Contact' : 'Block Contact'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowReportBox(!showReportBox)}
+              className="glass-btn"
+              style={{
+                flex: 1,
+                height: '40px',
+                borderRadius: '14px',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: '700',
+                color: '#d97706',
+                borderColor: 'rgba(245,158,11,0.35)',
+                backgroundColor: 'rgba(245,158,11,0.08)'
+              }}
+            >
+              <Flag size={15} />
+              <span>Report User</span>
+            </button>
+          </div>
+
+          {showReportBox && (
+            <form onSubmit={handleSubmitReport} className="glass-card" style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <span style={{ fontSize: '11px', fontWeight: '800', color: '#d97706', textTransform: 'uppercase' }}>
+                Report Reason
+              </span>
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+                className="glass-input"
+                style={{ fontSize: '12px', padding: '8px' }}
+              >
+                <option value="Spam">Spam or Unwanted Messages</option>
+                <option value="Scam / Fraud">Scam, Fraud or Fake Links</option>
+                <option value="Harassment">Harassment or Abuse</option>
+                <option value="Impersonation">Fake Identity</option>
+              </select>
+              <input
+                type="text"
+                value={reportDetails}
+                onChange={(e) => setReportDetails(e.target.value)}
+                placeholder="Optional details..."
+                className="glass-input"
+                style={{ fontSize: '12px', padding: '8px' }}
+              />
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button type="submit" className="glass-btn glass-btn-primary" style={{ flex: 1, height: '34px', fontSize: '12px', fontWeight: '700' }}>
+                  Submit Report
+                </button>
+                <button type="button" onClick={() => setShowReportBox(false)} className="glass-btn" style={{ height: '34px', padding: '0 12px', fontSize: '12px' }}>
+                  Cancel
+                </button>
+              </div>
+              {reportFeedback && (
+                <span style={{ fontSize: '11px', fontWeight: '700', color: reportFeedback.includes('✅') ? '#16a34a' : '#d97706' }}>
+                  {reportFeedback}
+                </span>
+              )}
+            </form>
+          )}
         </div>
 
         {/* Full Image Zoom Modal */}

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch-path=src/index.js --watch-path=src/routes --watch-path=src/socket src/index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -4,18 +4,25 @@ import {
   Camera, ShieldAlert, Lock, CheckCircle2, LogOut,
   User, Mail, Calendar, Radio, ChevronRight, X,
   Share2, HardDrive, MessageSquare, Database, Trash2,
-  Check, Sliders, Bell, Palette, Send, KeyRound
+  Check, Sliders, Bell, Palette, Send, KeyRound, Shield
 } from 'lucide-react';
+import { resolveDisplayName } from '../utils/contacts';
 
 export default function SettingsScreen({ 
   currentUser, 
   contacts = [],
+  savedContactsMap = {},
   onLogout, 
   onOpenAdmin,
   onUpdateAvatar,
   onUpdateUser,
   onCheckForUpdates,
-  appVersion = '1.0.0'
+  appVersion = '1.0.0',
+  appTheme = 'light',
+  onApplyTheme,
+  chatTransparency = 100,
+  onChangeChatTransparency,
+  onOpenSos
 }) {
   // Modal states
   const [activeModal, setActiveModal] = useState(null); // 'profile' | 'broadcast' | 'account' | 'privacy' | 'chats' | 'appearance' | 'storage'
@@ -108,9 +115,63 @@ export default function SettingsScreen({
   });
 
   // Appearance State
-  const [blurIntensity, setBlurIntensity] = useState(24);
-  const [selectedTheme, setSelectedTheme] = useState('light');
+  const [blurIntensity, setBlurIntensity] = useState(currentUser?.appearance?.blur || 24);
+  const [selectedTheme, setSelectedTheme] = useState(appTheme || currentUser?.appearance?.theme || 'light');
   const [showAmbientGlow, setShowAmbientGlow] = useState(true);
+
+  // Family Safe Mode State (Child / Parental Safety Controls)
+  const [familySafeEnabled, setFamilySafeEnabled] = useState(Boolean(currentUser?.familySafe?.enabled));
+  const [familySafePin, setFamilySafePin] = useState(currentUser?.familySafe?.pin || '1234');
+  const [familySafePinVerify, setFamilySafePinVerify] = useState('');
+  const [familySafeBlockLinks, setFamilySafeBlockLinks] = useState(currentUser?.familySafe?.blockUnknownLinks !== false);
+  const [familySafeContactsOnly, setFamilySafeContactsOnly] = useState(currentUser?.familySafe?.approveContactsOnly !== false);
+  const [familySafeDailyLimit, setFamilySafeDailyLimit] = useState(currentUser?.familySafe?.dailyLimitMinutes || 60);
+  const [familySafeMsg, setFamilySafeMsg] = useState('');
+  const [familySafeSaving, setFamilySafeSaving] = useState(false);
+
+  const handleSaveFamilySafe = async (nextEnabled) => {
+    setFamilySafeMsg('');
+    if (familySafeEnabled && !nextEnabled) {
+      if (familySafePinVerify.trim() !== String(currentUser?.familySafe?.pin || familySafePin)) {
+        setFamilySafeMsg('❌ Enter correct Parent PIN to turn off Family Safe Mode.');
+        return;
+      }
+    }
+    if (nextEnabled && (!/^\d{4}$/.test(familySafePin.trim()))) {
+      setFamilySafeMsg('Parent PIN must be 4 digits.');
+      return;
+    }
+
+    setFamilySafeSaving(true);
+    try {
+      const res = await fetch('/api/auth/family-safe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser?.id,
+          enabled: nextEnabled,
+          pin: familySafePin.trim(),
+          blockUnknownLinks: familySafeBlockLinks,
+          approveContactsOnly: familySafeContactsOnly,
+          dailyLimitMinutes: Number(familySafeDailyLimit) || 60
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.user) {
+        setFamilySafeEnabled(nextEnabled);
+        setFamilySafePinVerify('');
+        setFamilySafeMsg(nextEnabled ? '✅ Family Safe Mode Enabled!' : 'Family Safe Mode turned off');
+        onUpdateUser?.(data.user);
+        localStorage.setItem('glasschat_user', JSON.stringify(data.user));
+      } else {
+        setFamilySafeMsg(data.error || 'Failed to save');
+      }
+    } catch {
+      setFamilySafeMsg('Network error');
+    } finally {
+      setFamilySafeSaving(false);
+    }
+  };
 
   // Broadcast Modal State
   const [broadcastSelectedUsers, setBroadcastSelectedUsers] = useState([]);
@@ -289,7 +350,9 @@ export default function SettingsScreen({
           { id: 'broadcast', label: 'Broadcast Message', sub: 'Send message to multiple contacts', icon: Radio, color: '#0284c7' },
           { id: 'account', label: 'Account', sub: 'Security, two-step verification, change number', icon: User, color: '#3b82f6' },
           { id: 'privacy', label: 'Privacy', sub: 'Last seen, profile photo, about, DOB, email', icon: Lock, color: '#10b981' },
-          { id: 'chats', label: 'Chats', sub: 'Theme, wallpapers, chat history', icon: MessageSquare, color: '#8b5cf6' },
+          { id: 'familySafe', label: 'Family Safe Mode', sub: familySafeEnabled ? '● Active: Parental PIN & link protection' : 'Parental controls, unknown link guard, screen limit', icon: Shield, color: '#6366f1' },
+          { id: 'sos', label: 'Emergency SOS Contacts', sub: 'Instant GPS + SMS emergency alert setup', icon: ShieldAlert, color: '#ef4444' },
+          { id: 'chats', label: 'Chats & Dark Mode', sub: 'Dark mode, themes, wallpapers, history', icon: MessageSquare, color: '#8b5cf6' },
           { id: 'appearance', label: 'Appearance', sub: 'Frosted blur intensity, ambient light', icon: Palette, color: '#ec4899' },
           { id: 'storage', label: 'Storage and Data', sub: 'Network usage, media auto-download', icon: HardDrive, color: '#f59e0b' }
         ].map(item => {
@@ -297,7 +360,13 @@ export default function SettingsScreen({
           return (
             <div
               key={item.id}
-              onClick={() => setActiveModal(item.id)}
+              onClick={() => {
+                if (item.id === 'sos') {
+                  onOpenSos?.();
+                } else {
+                  setActiveModal(item.id);
+                }
+              }}
               className="glass-card"
               style={{
                 padding: '13px 16px',
@@ -712,7 +781,7 @@ export default function SettingsScreen({
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <img src={c.avatar} alt={c.name} style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover' }} />
                       <div>
-                        <h4 style={{ fontSize: '13px', fontWeight: '700', margin: 0 }}>{c.name}</h4>
+                        <h4 style={{ fontSize: '13px', fontWeight: '700', margin: 0 }}>{resolveDisplayName(c, savedContactsMap, true)}</h4>
                         <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{c.phone}</span>
                       </div>
                     </div>
@@ -938,32 +1007,99 @@ export default function SettingsScreen({
                 <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--text-secondary)', display: 'block', marginBottom: '8px' }}>
                   Chat Glass Theme
                 </span>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
                   {[
-                    { id: 'light', name: 'Light Glass', bg: 'linear-gradient(135deg, #e0f2fe, #f0fdf4)' },
-                    { id: 'aurora', name: 'Aurora Glass', bg: 'linear-gradient(135deg, #f3e8ff, #e0e7ff)' },
-                    { id: 'sunset', name: 'Warm Glass', bg: 'linear-gradient(135deg, #ffedd5, #fef08a)' }
+                    { id: 'light', name: '☀️ Light Glass', bg: 'linear-gradient(135deg, #e0f2fe, #f0fdf4)', darkText: true },
+                    { id: 'dark', name: '🌙 Dark Glass', bg: 'linear-gradient(135deg, #0f172a, #1e293b)', darkText: false },
+                    { id: 'aurora', name: '✨ Aurora Glass', bg: 'linear-gradient(135deg, #f3e8ff, #e0e7ff)', darkText: true },
+                    { id: 'sunset', name: '🌅 Warm Glass', bg: 'linear-gradient(135deg, #ffedd5, #fef08a)', darkText: true }
                   ].map(thm => (
                     <div
                       key={thm.id}
-                      onClick={() => setSelectedTheme(thm.id)}
+                      onClick={() => {
+                        setSelectedTheme(thm.id);
+                        onApplyTheme?.(thm.id);
+                      }}
                       style={{
-                        height: '70px',
+                        height: '62px',
                         borderRadius: '14px',
                         background: thm.bg,
-                        border: selectedTheme === thm.id ? '2px solid #0284c7' : '1px solid rgba(255,255,255,0.7)',
+                        border: selectedTheme === thm.id ? '2px solid #0284c7' : '1px solid rgba(255,255,255,0.5)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        fontSize: '11px',
-                        fontWeight: '700',
-                        color: '#0f172a',
+                        fontSize: '12px',
+                        fontWeight: '800',
+                        color: thm.darkText ? '#0f172a' : '#f8fafc',
                         cursor: 'pointer'
                       }}
                     >
                       {thm.name}
                     </div>
                   ))}
+                </div>
+              </div>
+
+              {/* Chat Message Bubble & Border Transparency Control */}
+              <div className="glass-card" style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h4 style={{ fontSize: '13px', fontWeight: '800', margin: 0, color: 'var(--text-primary)' }}>
+                      Chat Bubble Transparency
+                    </h4>
+                    <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '2px 0 0 0' }}>
+                      Sent & received message background and border transparency
+                    </p>
+                  </div>
+                  <span className="glass-pill" style={{ padding: '2px 9px', fontSize: '11px', fontWeight: '800', color: '#0284c7' }}>
+                    {chatTransparency}%
+                  </span>
+                </div>
+
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={chatTransparency}
+                  onChange={(e) => onChangeChatTransparency?.(Number(e.target.value))}
+                  style={{ width: '100%', accentColor: '#0284c7', cursor: 'pointer' }}
+                />
+
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {[
+                    { label: '100% Transparent', val: 100 },
+                    { label: '80% Sheer', val: 80 },
+                    { label: '50% Glass', val: 50 },
+                    { label: '0% Solid Glass', val: 0 }
+                  ].map(p => (
+                    <button
+                      key={p.val}
+                      type="button"
+                      onClick={() => onChangeChatTransparency?.(p.val)}
+                      className="glass-pill"
+                      style={{
+                        padding: '4px 9px',
+                        fontSize: '10px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        borderColor: chatTransparency === p.val ? '#0284c7' : undefined,
+                        color: chatTransparency === p.val ? '#0284c7' : 'var(--text-secondary)'
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Live Mini Preview */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '10px', borderRadius: '14px', background: 'var(--app-backdrop)', border: '1px solid var(--glass-border-subtle)' }}>
+                  <div className="message-bubble-incoming" style={{ alignSelf: 'flex-start', padding: '6px 11px', borderRadius: '14px', fontSize: '11px', color: 'var(--text-primary)' }}>
+                    Incoming message preview
+                  </div>
+                  <div className="message-bubble-outgoing" style={{ alignSelf: 'flex-end', padding: '6px 11px', borderRadius: '14px', fontSize: '11px', fontWeight: '600', color: '#059669' }}>
+                    Outgoing message preview ✓✓
+                  </div>
                 </div>
               </div>
 
@@ -1038,7 +1174,7 @@ export default function SettingsScreen({
                     Frosted Glass Blur: {blurIntensity}px
                   </span>
                   <span className="glass-pill" style={{ padding: '2px 8px', fontSize: '10px', color: '#0284c7' }}>
-                    {blurIntensity < 20 ? 'Halka (Light)' : 'Strong'}
+                    {blurIntensity < 20 ? 'Light' : 'Strong'}
                   </span>
                 </div>
                 <input 
@@ -1046,7 +1182,11 @@ export default function SettingsScreen({
                   min="8"
                   max="40"
                   value={blurIntensity}
-                  onChange={e => setBlurIntensity(Number(e.target.value))}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    setBlurIntensity(v);
+                    document.documentElement.style.setProperty('--glass-blur', `${v}px`);
+                  }}
                   style={{ width: '100%', accentColor: '#0284c7' }}
                 />
               </div>
@@ -1392,6 +1532,118 @@ export default function SettingsScreen({
               style={{ padding: '12px', fontWeight: '700' }}
             >
               Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* MODAL 8: FAMILY SAFE MODE (PARENTAL CONTROLS) */}
+      {/* ==================================================== */}
+      {activeModal === 'familySafe' && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 170,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(20px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '16px'
+        }}>
+          <div className="glass-panel" style={{
+            width: '100%',
+            maxWidth: '430px',
+            borderRadius: '28px',
+            padding: '24px 20px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
+            boxShadow: 'var(--glass-shadow-lg)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Shield size={18} color="#6366f1" />
+                <h3 style={{ fontSize: '17px', fontWeight: '800', margin: 0 }}>Family Safe Mode</h3>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="glass-btn" style={{ width: '32px', height: '32px' }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0 }}>
+              Safe mode for children & family: suspicious links from unknown senders are masked, contact filtering stays active, and changes are locked with a Parent PIN.
+            </p>
+
+            <div className="glass-card" style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '13px', fontWeight: '700' }}>
+                <span>Block Unknown Sender Links</span>
+                <input
+                  type="checkbox"
+                  checked={familySafeBlockLinks}
+                  onChange={(e) => setFamilySafeBlockLinks(e.target.checked)}
+                  style={{ accentColor: '#6366f1', width: '17px', height: '17px' }}
+                />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '13px', fontWeight: '700' }}>
+                <span>Approved Contacts Only Mode</span>
+                <input
+                  type="checkbox"
+                  checked={familySafeContactsOnly}
+                  onChange={(e) => setFamilySafeContactsOnly(e.target.checked)}
+                  style={{ accentColor: '#6366f1', width: '17px', height: '17px' }}
+                />
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: '12px', fontWeight: '700' }}>Screen-Time Daily Limit (mins)</span>
+                <select
+                  value={familySafeDailyLimit}
+                  onChange={(e) => setFamilySafeDailyLimit(Number(e.target.value))}
+                  className="glass-input"
+                  style={{ padding: '5px 10px', fontSize: '12px' }}
+                >
+                  <option value={30}>30 mins</option>
+                  <option value={60}>60 mins</option>
+                  <option value={120}>120 mins</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label style={{ fontSize: '11px', fontWeight: '700', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>
+                {familySafeEnabled ? 'Enter Current 4-Digit Parent PIN to Modify/Disable:' : 'Set 4-Digit Parent PIN:'}
+              </label>
+              <input
+                type="password"
+                maxLength={4}
+                inputMode="numeric"
+                value={familySafeEnabled ? familySafePinVerify : familySafePin}
+                onChange={(e) => {
+                  const v = e.target.value.replace(/\D/g, '');
+                  if (familySafeEnabled) setFamilySafePinVerify(v);
+                  else setFamilySafePin(v);
+                }}
+                placeholder="4-digit PIN (e.g. 1234)"
+                className="glass-input"
+                style={{ width: '100%', textAlign: 'center', fontSize: '16px', letterSpacing: '4px' }}
+              />
+            </div>
+
+            {familySafeMsg && (
+              <div style={{ fontSize: '12px', fontWeight: '700', color: familySafeMsg.includes('✅') ? '#16a34a' : '#ef4444' }}>
+                {familySafeMsg}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => handleSaveFamilySafe(!familySafeEnabled)}
+              disabled={familySafeSaving}
+              className="glass-btn glass-btn-primary"
+              style={{ padding: '12px', fontWeight: '800', background: familySafeEnabled ? 'linear-gradient(135deg, #ef4444, #dc2626)' : undefined }}
+            >
+              {familySafeSaving ? 'Saving...' : familySafeEnabled ? 'Turn Off Family Safe Mode' : 'Enable Family Safe Mode 👨‍👩‍👧'}
             </button>
           </div>
         </div>

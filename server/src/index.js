@@ -9,9 +9,9 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import apiRoutes from './routes/api.js';
-import { setupChatHandlers } from './socket/chatHandler.js';
+import { setupChatHandlers, dispatchChatMessage } from './socket/chatHandler.js';
 import { setupCallHandlers } from './socket/callHandler.js';
-import { users, messages, saveDatabase } from './data/store.js';
+import { users, messages, statuses, scheduledMessages, chatSettings, activeSessions, saveDatabase, saveDatabaseSync } from './data/store.js';
 
 dotenv.config();
 
@@ -55,6 +55,8 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST']
   },
+  pingInterval: 10000,
+  pingTimeout: 5000,
   maxHttpBufferSize: 1e7 // 10MB max socket payload (prevents memory-exhaustion DoS attacks)
 });
 
@@ -126,7 +128,7 @@ app.get('/ios-manifest.plist', (req, res) => {
                 <key>bundle-identifier</key>
                 <string>com.glasschat.app</string>
                 <key>bundle-version</key>
-                <string>1.3.2</string>
+                <string>1.3.3</string>
                 <key>kind</key>
                 <string>software</string>
                 <key>title</key>
@@ -269,21 +271,37 @@ const userSocketMap = new Map();
 io.on('connection', (socket) => {
   console.log(`[Socket] New connection established: ${socket.id}`);
 
-  // Register user ID with socket
-  socket.on('register-user', ({ userId }) => {
+  // Register user ID with socket & record active session metadata for Admin inspector
+  socket.on('register-user', (payload) => {
+    const userId = typeof payload === 'string' ? payload : payload?.userId;
     if (!userId) return;
     socket.userId = userId;
     userSocketMap.set(userId, socket.id);
     socket.join(userId); // Join personal room for direct events
-    console.log(`[Socket] Registered User ${userId} -> Socket ${socket.id} (joined personal room)`);
+
+    const clientIp = (socket.handshake?.headers?.['x-forwarded-for'] || socket.handshake?.address || '').toString().split(',')[0].trim();
+    const userAgent = (typeof payload === 'object' && payload?.userAgent) || socket.handshake?.headers?.['user-agent'] || 'Unknown';
+    const platform = (typeof payload === 'object' && payload?.platform) || 'Web';
+    const nowIso = new Date().toISOString();
+
+    activeSessions.set(userId, {
+      socketId: socket.id,
+      status: 'Active',
+      platform,
+      userAgent,
+      ip: clientIp,
+      connectedAt: nowIso
+    });
 
     const u = users.find(usr => usr.id === userId);
     if (u) {
       u.online = true;
+      u.lastLoginAt = nowIso;
+      u.lastDevice = platform;
       saveDatabase();
     }
 
-    // Broadcast online status
+    // Broadcast online status immediately
     io.emit('user-status-changed', { userId, online: true });
 
     // When recipient comes online (data ON): update pending 'sent' messages to 'delivered'
@@ -318,23 +336,96 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (socket.userId) {
-      userSocketMap.delete(socket.userId);
-      const nowIso = new Date().toISOString();
-      const u = users.find(usr => usr.id === socket.userId);
-      if (u) {
-        u.online = false;
-        u.lastSeen = nowIso;
-        saveDatabase();
+      if (userSocketMap.get(socket.userId) === socket.id) {
+        userSocketMap.delete(socket.userId);
+        const nowIso = new Date().toISOString();
+        const prevSession = activeSessions.get(socket.userId) || {};
+        activeSessions.set(socket.userId, {
+          ...prevSession,
+          status: 'Disconnected',
+          disconnectedAt: nowIso
+        });
+        const u = users.find(usr => usr.id === socket.userId);
+        if (u) {
+          u.online = false;
+          u.lastSeen = nowIso;
+          saveDatabase();
+        }
+        io.emit('user-status-changed', { userId: socket.userId, online: false, lastSeen: nowIso });
       }
-      console.log(`[Socket] Disconnected: User ${socket.userId}`);
-      io.emit('user-status-changed', { userId: socket.userId, online: false, lastSeen: nowIso });
     }
   });
 });
+
+// Background worker every 5s: Scheduled Messages, Disappearing Messages TTL, 24h Status cleanup
+setInterval(() => {
+  const nowMs = Date.now();
+  let modified = false;
+
+  // 1. Dispatch due scheduled messages
+  for (let i = scheduledMessages.length - 1; i >= 0; i--) {
+    const item = scheduledMessages[i];
+    if (item && item.sendAtMs <= nowMs) {
+      scheduledMessages.splice(i, 1);
+      modified = true;
+      dispatchChatMessage(io, userSocketMap, item.payload);
+      if (item.payload?.senderId) {
+        io.to(item.payload.senderId).emit('scheduled-message-sent', {
+          id: item.id,
+          chatId: item.payload.chatId
+        });
+      }
+    }
+  }
+
+  // 2. Expire disappearing messages
+  for (const [cId, msgList] of Object.entries(messages)) {
+    if (!Array.isArray(msgList) || msgList.length === 0) continue;
+    const expiredIds = [];
+    const remaining = msgList.filter(m => {
+      if (m.expiresAt && m.expiresAt <= nowMs) {
+        expiredIds.push(m.id);
+        return false;
+      }
+      return true;
+    });
+    if (expiredIds.length > 0) {
+      messages[cId] = remaining;
+      modified = true;
+      io.to(cId).emit('messages-expired', { chatId: cId, expiredIds });
+    }
+  }
+
+  // 3. Clean 24-hour expired statuses
+  const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+  for (let i = statuses.length - 1; i >= 0; i--) {
+    const st = statuses[i];
+    if (st?.createdAt && (nowMs - new Date(st.createdAt).getTime()) > STATUS_TTL_MS) {
+      const removed = statuses.splice(i, 1)[0];
+      modified = true;
+      if (removed?.id) {
+        io.emit('status-deleted', { id: removed.id });
+      }
+    }
+  }
+
+  if (modified) {
+    saveDatabase();
+  }
+}, 5000);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 GlassChat Node.js Server running on port ${PORT}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+});
+
+process.on('SIGINT', () => {
+  saveDatabaseSync();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  saveDatabaseSync();
+  process.exit(0);
 });
 

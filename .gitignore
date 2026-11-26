@@ -20,6 +20,7 @@ bin/
 # Secrets & Environment
 .env
 server/.env
+server/recordings/
 
 # Logs
 *.log

@@ -4,12 +4,30 @@ import {
   Smile, CheckCheck, Check, MoreVertical, Image, Users, Lock, 
   Mic, MicOff, Play, Pause, Trash2, X, Download,
   FileText, Camera, Headphones, User, BarChart2, Calendar, SmilePlus, Plus,
-  PhoneMissed, Search, Copy, Languages, Zap
+  PhoneMissed, Search, Copy, Languages, Zap,
+  Reply, Forward, Pin, Star, Pencil, ShieldCheck, MapPin, IndianRupee,
+  Clock, Handshake, Sparkles, Megaphone, ExternalLink, AlertTriangle
 } from 'lucide-react';
 import SecurityVerificationModal from './SecurityVerificationModal';
 import UserProfileModal from './UserProfileModal';
-import { playNotificationSound } from '../services/notifications';
+import ChatFeatureModals, { WALLPAPER_PRESETS } from './ChatFeatureModals';
+import { playNotificationSound, addSmartReminder } from '../services/notifications';
 import { formatISTTime, formatLastSeen } from '../utils/time';
+import { resolveDisplayName, isSavedNumber } from '../utils/contacts';
+import {
+  getCachedChatMessages,
+  saveCachedChatMessages,
+  enqueueOfflineMessage,
+  removeOfflineQueuedMessage
+} from '../utils/offlineQueue';
+import {
+  SUPPORTED_LANGUAGES,
+  translateText,
+  generateSmartReplies,
+  analyzeMoodTone,
+  extractSmartAction,
+  maskUnknownLinks
+} from '../utils/aiHelpers';
 
 const formatFileSize = (bytes) => {
   if (!bytes) return '0 B';
@@ -27,7 +45,8 @@ export default function ChatRoom({
   contacts = [],
   socket,
   savedContactsMap = {},
-  onSaveContact
+  onSaveContact,
+  onOpenSos
 }) {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
@@ -46,6 +65,7 @@ export default function ChatRoom({
   const cleanPhoneDigits = (chat.phone || '').replace(/\D/g, '');
   const last10Digits = cleanPhoneDigits.slice(-10);
   const savedContactName = !chat.isGroup ? (savedContactsMap[last10Digits] || savedContactsMap[cleanPhoneDigits] || '') : '';
+  const resolvedHeaderName = chat.isGroup ? chat.name : resolveDisplayName(chat, savedContactsMap, true);
   const [previewImage, setPreviewImage] = useState(null);
 
   // WhatsApp Attachment Menu & Modals State
@@ -54,6 +74,43 @@ export default function ChatRoom({
   const [showPollModal, setShowPollModal] = useState(false);
   const [showEventModal, setShowEventModal] = useState(false);
   const [showStickerModal, setShowStickerModal] = useState(false);
+
+  // Advanced Chat Features State
+  const [chatSettings, setChatSettings] = useState({ disappearDurationMs: 0, pinnedMessageId: null, pinnedMessage: null });
+  const [showOptionsModal, setShowOptionsModal] = useState(false);
+  const [summaryModal, setSummaryModal] = useState(null);
+  const [truthCheckModal, setTruthCheckModal] = useState(null);
+  const [forwardMsg, setForwardMsg] = useState(null);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [showUpiModal, setShowUpiModal] = useState(false);
+  const [showContractModal, setShowContractModal] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [editingMsg, setEditingMsg] = useState(null);
+  const [showStarredOnly, setShowStarredOnly] = useState(false);
+  const [scheduledList, setScheduledList] = useState([]);
+  const [showTranscripts, setShowTranscripts] = useState({});
+  const [reminderSavedIds, setReminderSavedIds] = useState({});
+  const [rejectionToast, setRejectionToast] = useState('');
+  const [isAnonPoll, setIsAnonPoll] = useState(false);
+  const [anonVotes, setAnonVotes] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`glasschat_anon_votes_${currentUser?.id}`) || '{}');
+    } catch {
+      return {};
+    }
+  });
+
+  const roomKey = chat.isGroup
+    ? (chat.id.startsWith('group_') ? chat.id : `group_${chat.id}`)
+    : ['chat', ...[currentUser.id, chat.id].sort()].join('_');
+
+  const [autoTranslateLang, setAutoTranslateLang] = useState(() => localStorage.getItem(`glasschat_autotrans_${roomKey}`) || 'off');
+  const [chatWallpaper, setChatWallpaper] = useState(() => localStorage.getItem(`glasschat_wallpaper_${roomKey}`) || 'default');
+  const [moodGuardEnabled, setMoodGuardEnabled] = useState(() => localStorage.getItem('glasschat_mood_guard') !== 'off');
+
+  const isChannelRestricted = Boolean(chat.isChannel) && chat.admin !== currentUser.id && !(Array.isArray(chat.admins) && chat.admins.includes(currentUser.id));
+  const speechRecRef = useRef(null);
+  const liveTranscriptRef = useRef('');
 
   // Poll Form State
   const [pollQuestion, setPollQuestion] = useState('');
@@ -119,6 +176,19 @@ export default function ChatRoom({
         setShowStickerModal(false);
         return true;
       }
+      if (showOptionsModal) {
+        setShowOptionsModal(false);
+        return true;
+      }
+      if (summaryModal || truthCheckModal || forwardMsg || showScheduleModal || showUpiModal || showContractModal) {
+        setSummaryModal(null);
+        setTruthCheckModal(null);
+        setForwardMsg(null);
+        setShowScheduleModal(false);
+        setShowUpiModal(false);
+        setShowContractModal(false);
+        return true;
+      }
       if (activeMessageMenu) {
         setActiveMessageMenu(null);
         return true;
@@ -132,7 +202,9 @@ export default function ChatRoom({
   }, [
     previewImage, showEmojiPicker, showAttachmentMenu, 
     showProfileModal, showSecurityModal, showContactModal, 
-    showPollModal, showEventModal, showStickerModal, activeMessageMenu
+    showPollModal, showEventModal, showStickerModal, activeMessageMenu,
+    showOptionsModal, summaryModal, truthCheckModal, forwardMsg,
+    showScheduleModal, showUpiModal, showContractModal
   ]);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -177,26 +249,78 @@ export default function ChatRoom({
     ? (chat.id.startsWith('group_') ? chat.id : `group_${chat.id}`)
     : ['chat', ...[currentUser.id, chat.id].sort()].join('_');
 
-  // Fetch initial messages from API & Join Socket room
+  // Sync offline cache asynchronously (debounced so live messaging never blocks main thread)
   useEffect(() => {
-    // Fetch chat history
+    if (messages.length === 0) return;
+    const t = setTimeout(() => {
+      saveCachedChatMessages(chatId, messages);
+    }, 450);
+    return () => clearTimeout(t);
+  }, [messages, chatId]);
+
+  // Auto-translate incoming messages when chat Auto-Translate is active
+  useEffect(() => {
+    if (autoTranslateLang === 'off') return;
+    const recentIncoming = messages
+      .filter(m => m.senderId !== currentUser.id && m.text && !translatedMessages[m.id] && m.type === 'text')
+      .slice(-6);
+    if (recentIncoming.length === 0) return;
+
+    recentIncoming.forEach(async (m) => {
+      try {
+        const res = await translateText(m.text, autoTranslateLang);
+        setTranslatedMessages(prev => ({
+          ...prev,
+          [m.id]: { text: res.translatedText, lang: res.langLabel }
+        }));
+      } catch {}
+    });
+  }, [messages, autoTranslateLang, currentUser.id]);
+
+  // Fetch initial messages (offline cache first, then server) & Join Socket room
+  useEffect(() => {
+    setAutoTranslateLang(localStorage.getItem(`glasschat_autotrans_${chatId}`) || 'off');
+    setChatWallpaper(localStorage.getItem(`glasschat_wallpaper_${chatId}`) || 'default');
+    const cached = getCachedChatMessages(chatId);
+    if (cached.length > 0) {
+      setMessages(cached);
+    } else {
+      setMessages([]);
+    }
+
     fetch(`/api/chats/${chatId}`)
       .then(res => res.json())
       .then(data => {
-        setMessages(data || []);
-        // Automatically mark all incoming messages as seen upon entering chat
+        if (Array.isArray(data)) {
+          setMessages(data);
+          saveCachedChatMessages(chatId, data);
+        }
         socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
       })
-      .catch(err => console.error('Failed to load chat messages:', err));
+      .catch(err => console.error('Offline/Fetch chat history notice:', err));
 
-    // Join room & emit seen
+    fetch(`/api/chats/${chatId}/settings?userId=${currentUser.id}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data && !data.error) setChatSettings(data);
+      })
+      .catch(() => {});
+
+    fetch(`/api/scheduled-messages?chatId=${chatId}&userId=${currentUser.id}`)
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data)) setScheduledList(data);
+      })
+      .catch(() => {});
+
     socket.emit('join-chat', { chatId });
     socket.emit('mark-chat-seen', { chatId, readerId: currentUser.id });
 
-    // Listen for new messages
     const handleNewMessage = (payload) => {
       if (payload.chatId === chatId) {
-        // If message is from someone else, play sound chime and mark as seen immediately
+        if (payload.tempId) {
+          removeOfflineQueuedMessage(payload.tempId);
+        }
         if (payload.message.senderId !== currentUser.id) {
           playNotificationSound();
           if (payload.message.isUrgent && typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -208,12 +332,10 @@ export default function ChatRoom({
         setMessages(prev => {
           if (prev.some(m => m.id === payload.message.id)) return prev;
 
-          // 1. If payload carries tempId, replace the matching optimistic message
           if (payload.tempId && prev.some(m => m.id === payload.tempId)) {
             return prev.map(m => m.id === payload.tempId ? payload.message : m);
           }
 
-          // 2. If recent optimistic message from current user with matching text or type
           const optIdx = prev.findIndex(m => 
             m.senderId === payload.message.senderId &&
             (m.id.startsWith('msg_') || m.id.startsWith('temp_')) &&
@@ -230,14 +352,12 @@ export default function ChatRoom({
       }
     };
 
-    // Listen for remote typing status
     const handleUserTyping = (payload) => {
       if (payload.chatId === chatId && payload.userId !== currentUser.id) {
-        setRemoteTypingUser(payload.isTyping ? payload.userName : null);
+        setRemoteTypingUser(payload.isTyping ? (resolveDisplayName({ name: payload.userName, phone: chat.phone }, savedContactsMap, true)) : null);
       }
     };
 
-    // Listen for chat messages seen (ticks turn blue #34B7F1)
     const handleChatMessagesSeen = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.map(m => 
@@ -246,7 +366,6 @@ export default function ChatRoom({
       }
     };
 
-    // Listen for messages delivered (single grey tick -> double grey tick)
     const handleMessagesDelivered = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.map(m => 
@@ -257,31 +376,89 @@ export default function ChatRoom({
       }
     };
 
-    // Listen for single message status update
     const handleMessageStatusUpdated = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, status: payload.status } : m));
       }
     };
 
-    // Listen for reaction updates
     const handleReactionUpdated = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, reactions: payload.reactions } : m));
       }
     };
 
-    // Listen for deleted messages
     const handleMessageDeleted = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.filter(m => m.id !== payload.messageId));
       }
     };
 
-    // Listen for poll updates
+    const handleMessageEdited = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, text: payload.newText, isEdited: true, editedAt: payload.editedAt } : m));
+      }
+    };
+
+    const handleStarUpdated = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, starredBy: payload.starredBy } : m));
+      }
+    };
+
+    const handlePinUpdated = (payload) => {
+      if (payload.chatId === chatId) {
+        setChatSettings(prev => ({
+          ...prev,
+          pinnedMessageId: payload.pinnedMessageId,
+          pinnedMessage: payload.pinnedMessage
+        }));
+      }
+    };
+
     const handlePollUpdated = (payload) => {
       if (payload.chatId === chatId) {
         setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, pollData: payload.pollData } : m));
+      }
+    };
+
+    const handleContractUpdated = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, contractData: payload.contractData } : m));
+      }
+    };
+
+    const handleUpiUpdated = (payload) => {
+      if (payload.chatId === chatId) {
+        setMessages(prev => prev.map(m => m.id === payload.messageId ? { ...m, upiData: payload.upiData } : m));
+      }
+    };
+
+    const handleMessagesExpired = (payload) => {
+      if (payload.chatId === chatId && Array.isArray(payload.expiredIds)) {
+        setMessages(prev => prev.filter(m => !payload.expiredIds.includes(m.id)));
+      }
+    };
+
+    const handleChatSettingsUpdated = (payload) => {
+      if (payload.chatId === chatId && payload.settings) {
+        setChatSettings(prev => ({ ...prev, ...payload.settings }));
+      }
+    };
+
+    const handleScheduledSent = (payload) => {
+      if (payload.chatId === chatId) {
+        setScheduledList(prev => prev.filter(s => s.id !== payload.scheduledId));
+      }
+    };
+
+    const handleMessageRejected = (payload) => {
+      if (payload.chatId === chatId) {
+        if (payload.tempId) {
+          setMessages(prev => prev.filter(m => m.id !== payload.tempId));
+        }
+        setRejectionToast(payload.reason || 'Message could not be sent.');
+        setTimeout(() => setRejectionToast(''), 4000);
       }
     };
 
@@ -292,7 +469,16 @@ export default function ChatRoom({
     socket.on('message-status-updated', handleMessageStatusUpdated);
     socket.on('message-reaction-updated', handleReactionUpdated);
     socket.on('message-deleted', handleMessageDeleted);
+    socket.on('message-edited', handleMessageEdited);
+    socket.on('message-star-updated', handleStarUpdated);
+    socket.on('chat-pin-updated', handlePinUpdated);
     socket.on('poll-updated', handlePollUpdated);
+    socket.on('contract-updated', handleContractUpdated);
+    socket.on('upi-updated', handleUpiUpdated);
+    socket.on('messages-expired', handleMessagesExpired);
+    socket.on('chat-settings-updated', handleChatSettingsUpdated);
+    socket.on('scheduled-message-sent', handleScheduledSent);
+    socket.on('message-rejected', handleMessageRejected);
 
     return () => {
       socket.emit('leave-chat', { chatId });
@@ -303,7 +489,16 @@ export default function ChatRoom({
       socket.off('message-status-updated', handleMessageStatusUpdated);
       socket.off('message-reaction-updated', handleReactionUpdated);
       socket.off('message-deleted', handleMessageDeleted);
+      socket.off('message-edited', handleMessageEdited);
+      socket.off('message-star-updated', handleStarUpdated);
+      socket.off('chat-pin-updated', handlePinUpdated);
       socket.off('poll-updated', handlePollUpdated);
+      socket.off('contract-updated', handleContractUpdated);
+      socket.off('upi-updated', handleUpiUpdated);
+      socket.off('messages-expired', handleMessagesExpired);
+      socket.off('chat-settings-updated', handleChatSettingsUpdated);
+      socket.off('scheduled-message-sent', handleScheduledSent);
+      socket.off('message-rejected', handleMessageRejected);
     };
   }, [chatId, socket, currentUser.id]);
 
@@ -324,6 +519,7 @@ export default function ChatRoom({
         chatId,
         userId: currentUser.id,
         userName: currentUser.name,
+        recipientId: isGroup ? null : chat.id,
         isTyping: true
       });
     }
@@ -335,15 +531,29 @@ export default function ChatRoom({
         chatId,
         userId: currentUser.id,
         userName: currentUser.name,
+        recipientId: isGroup ? null : chat.id,
         isTyping: false
       });
     }, 1500);
   };
 
-  // Helper to send message payload
+  // Helper to send message payload (supports reply quote & offline queue)
   const emitMessage = (msgData) => {
     const tempId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
     const timeStr = formatISTTime();
+    const replySnapshot = replyingTo
+      ? {
+          id: replyingTo.id,
+          senderName: resolveDisplayName(
+            { name: replyingTo.senderName, phone: replyingTo.senderPhone },
+            savedContactsMap,
+            true
+          ),
+          text: replyingTo.text || (replyingTo.type !== 'text' ? `[${replyingTo.type}]` : '')
+        }
+      : null;
+
+    const isSocketReady = Boolean(socket?.connected);
 
     const optimisticMsg = {
       id: tempId,
@@ -352,15 +562,16 @@ export default function ChatRoom({
       senderPhone: currentUser.phone || '',
       senderAvatar: currentUser.avatar || '',
       timestamp: timeStr,
-      status: chat.online ? 'delivered' : 'sent',
+      status: !isSocketReady ? 'queued' : (chat.online ? 'delivered' : 'sent'),
       encrypted: true,
       isUrgent: isUrgentMode,
+      replyTo: replySnapshot,
       ...msgData
     };
 
     setMessages(prev => [...prev, optimisticMsg]);
 
-    socket.emit('send-message', {
+    const payload = {
       tempId,
       chatId,
       senderId: currentUser.id,
@@ -370,13 +581,21 @@ export default function ChatRoom({
       encrypted: true,
       recipientId: isGroup ? null : chat.id,
       isUrgent: isUrgentMode,
+      replyTo: replySnapshot,
       ...msgData
-    });
+    };
+
+    if (isSocketReady) {
+      socket.emit('send-message', payload);
+    } else {
+      enqueueOfflineMessage(payload);
+    }
 
     if (isUrgentMode) setIsUrgentMode(false);
+    if (replyingTo) setReplyingTo(null);
   };
 
-  // Instant In-Chat AI Translator (Hindi <-> English)
+  // Instant In-Chat & Multi-Language Translator
   const handleTranslateMessage = async (msgId, text) => {
     if (translatedMessages[msgId]) {
       setTranslatedMessages(prev => {
@@ -388,14 +607,12 @@ export default function ChatRoom({
       return;
     }
     const hasDevanagari = /[\u0900-\u097F]/.test(text || '');
-    const targetLang = hasDevanagari ? 'en' : 'hi';
+    const targetLang = autoTranslateLang !== 'off' ? autoTranslateLang : (hasDevanagari ? 'en' : 'hi');
     try {
-      const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`);
-      const data = await res.json();
-      const translated = data[0].map(item => item[0]).join('');
+      const res = await translateText(text, targetLang);
       setTranslatedMessages(prev => ({
         ...prev,
-        [msgId]: { text: translated, lang: targetLang === 'hi' ? 'Hindi' : 'English' }
+        [msgId]: { text: res.translatedText, lang: res.langLabel }
       }));
     } catch (e) {
       console.warn('Translation failed:', e);
@@ -403,15 +620,191 @@ export default function ChatRoom({
     setActiveMessageMenu(null);
   };
 
-  // Handle Send Text Message
+  // Handle Send OR Edit Text Message
   const handleSendMessage = (e) => {
     e?.preventDefault();
     const textToSend = inputText.trim();
     if (!textToSend) return;
 
+    if (editingMsg) {
+      socket.emit('edit-message', {
+        chatId,
+        messageId: editingMsg.id,
+        newText: textToSend,
+        userId: currentUser.id
+      });
+      setEditingMsg(null);
+      setInputText('');
+      return;
+    }
+
     emitMessage({ text: textToSend, type: 'text' });
     setInputText('');
     setShowEmojiPicker(false);
+  };
+
+  // Share Current Location Card
+  const handleShareLocation = () => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      alert('Location sharing is not supported on this browser/device.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        emitMessage({
+          text: `📍 Shared Location: https://maps.google.com/?q=${lat},${lng}`,
+          type: 'location',
+          locationData: { lat, lng, accuracy: Math.round(pos.coords.accuracy || 0), label: 'Current Location' }
+        });
+      },
+      () => {
+        alert('Location permission denied or unavailable. Please allow GPS access.');
+      },
+      { enableHighAccuracy: true, timeout: 6000 }
+    );
+  };
+
+  // Run AI Truth Check (Fact-Check)
+  const handleRunTruthCheck = async (msg) => {
+    setActiveMessageMenu(null);
+    setTruthCheckModal({ loading: true });
+    try {
+      const res = await fetch('/api/ai/truth-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: msg.text || msg.transcript || '' })
+      });
+      const data = await res.json();
+      setTruthCheckModal(data);
+    } catch {
+      setTruthCheckModal({
+        verdict: 'Unable to reach Truth Check server',
+        level: 'caution',
+        riskScore: 0,
+        reasons: ['Check your internet connection and try again.'],
+        references: []
+      });
+    }
+  };
+
+  // Run AI Chat Summary
+  const handleRunAiSummary = async () => {
+    setSummaryModal({ loading: true });
+    try {
+      const res = await fetch('/api/ai/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId })
+      });
+      const data = await res.json();
+      setSummaryModal(data);
+    } catch {
+      setSummaryModal({ summary: 'Summary unavailable offline.', decisions: [], questions: [], actionItems: [] });
+    }
+  };
+
+  const handleUpdateDisappearTimer = async (durationMs) => {
+    try {
+      const res = await fetch(`/api/chats/${chatId}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disappearDurationMs: durationMs, userId: currentUser.id })
+      });
+      const data = await res.json();
+      if (data.success && data.settings) {
+        setChatSettings(prev => ({ ...prev, ...data.settings }));
+      }
+    } catch {}
+  };
+
+  const handleConfirmForward = (targetUser, msg) => {
+    const targetChatId = targetUser.isGroup
+      ? (targetUser.id.startsWith('group_') ? targetUser.id : `group_${targetUser.id}`)
+      : ['chat', ...[currentUser.id, targetUser.id].sort()].join('_');
+    socket.emit('send-message', {
+      tempId: 'fwd_' + Date.now(),
+      chatId: targetChatId,
+      senderId: currentUser.id,
+      senderName: currentUser.name,
+      senderPhone: currentUser.phone || '',
+      senderAvatar: currentUser.avatar || '',
+      recipientId: targetUser.isGroup ? null : targetUser.id,
+      text: msg.text || '',
+      mediaUrl: msg.mediaUrl || null,
+      type: msg.type || 'text',
+      fileName: msg.fileName || null,
+      fileSize: msg.fileSize || null,
+      locationData: msg.locationData || null,
+      isForwarded: true,
+      encrypted: true
+    });
+    setForwardMsg(null);
+    setRejectionToast(`Forwarded to ${resolveDisplayName(targetUser, savedContactsMap, true)} ✅`);
+    setTimeout(() => setRejectionToast(''), 2500);
+  };
+
+  const handleConfirmSchedule = async ({ text, sendAtMs }) => {
+    try {
+      const res = await fetch('/api/scheduled-messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sendAtMs,
+          payload: {
+            chatId,
+            senderId: currentUser.id,
+            senderName: currentUser.name,
+            senderPhone: currentUser.phone || '',
+            senderAvatar: currentUser.avatar || '',
+            recipientId: isGroup ? null : chat.id,
+            text,
+            type: 'text',
+            encrypted: true
+          }
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.scheduled) {
+        setScheduledList(prev => [...prev, data.scheduled]);
+        setRejectionToast(`⏰ Scheduled for ${data.scheduled.sendAtFormatted}`);
+        setTimeout(() => setRejectionToast(''), 3000);
+      }
+    } catch {}
+  };
+
+  const handleCancelScheduled = async (schedId) => {
+    try {
+      await fetch(`/api/scheduled-messages/${schedId}`, { method: 'DELETE' });
+      setScheduledList(prev => prev.filter(s => s.id !== schedId));
+    } catch {}
+  };
+
+  const handleConfirmUpi = ({ vpa, amount, note, mode }) => {
+    emitMessage({
+      text: `💸 UPI ${mode === 'request' ? 'Payment Request' : 'Pay Card'}: ₹${amount} (${note})`,
+      type: 'upi',
+      upiData: { vpa, amount, note, mode, status: 'pending' }
+    });
+  };
+
+  const handleConfirmContract = ({ title, dueText, amount }) => {
+    emitMessage({
+      text: `🤝 Chat Contract: ${title}${dueText ? ` (Due: ${dueText})` : ''}`,
+      type: 'contract',
+      contractData: { title, dueText, amount, status: 'pending' }
+    });
+  };
+
+  const handleCreateQuickReminder = (msgId, title, triggerAtMs, sourceText) => {
+    addSmartReminder({
+      title,
+      triggerAtMs,
+      chatName: resolvedHeaderName,
+      sourceText
+    });
+    setReminderSavedIds(prev => ({ ...prev, [msgId]: true }));
   };
 
   // ==========================================
@@ -515,10 +908,11 @@ export default function ChatRoom({
     }
 
     emitMessage({
-      text: `📊 Poll: ${cleanQuestion}`,
+      text: `${isAnonPoll ? '🕵️ Anonymous Poll' : '📊 Poll'}: ${cleanQuestion}`,
       type: 'poll',
       pollData: {
         question: cleanQuestion,
+        isAnonymous: isAnonPoll,
         options: cleanOptions.map((optText, idx) => ({
           id: String(idx + 1),
           text: optText,
@@ -529,6 +923,7 @@ export default function ChatRoom({
 
     setPollQuestion('');
     setPollOptions(['', '']);
+    setIsAnonPoll(false);
     setShowPollModal(false);
   };
 
@@ -594,6 +989,28 @@ export default function ChatRoom({
       mediaRecorder.start(250); // capture 250ms chunks
       setIsRecording(true);
       setRecordingSeconds(0);
+      liveTranscriptRef.current = '';
+
+      // Start Voice-to-Text live speech recognition when browser/WebView supports it
+      try {
+        const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRec) {
+          const rec = new SpeechRec();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = 'en-IN';
+          rec.onresult = (event) => {
+            let textOut = '';
+            for (let i = 0; i < event.results.length; i++) {
+              textOut += event.results[i][0].transcript + ' ';
+            }
+            liveTranscriptRef.current = textOut.trim();
+          };
+          rec.onerror = () => {};
+          rec.start();
+          speechRecRef.current = rec;
+        }
+      } catch {}
 
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = setInterval(() => {
@@ -607,6 +1024,9 @@ export default function ChatRoom({
 
   const cancelRecording = () => {
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    try { speechRecRef.current?.stop(); } catch {}
+    speechRecRef.current = null;
+    liveTranscriptRef.current = '';
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
@@ -622,6 +1042,10 @@ export default function ChatRoom({
   const sendRecording = () => {
     if (!mediaRecorderRef.current || !isRecording) return;
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    try { speechRecRef.current?.stop(); } catch {}
+    const capturedTranscript = liveTranscriptRef.current;
+    speechRecRef.current = null;
+    liveTranscriptRef.current = '';
 
     const durationStr = `${Math.floor(recordingSeconds / 60)}:${(recordingSeconds % 60).toString().padStart(2, '0')}`;
     const tempId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
@@ -650,15 +1074,16 @@ export default function ChatRoom({
           senderPhone: currentUser.phone || '',
           senderAvatar: currentUser.avatar || '',
           text: `🎤 Voice message (${durationStr})`,
+          transcript: capturedTranscript || '',
           mediaUrl: reader.result,
           type: 'audio',
           encrypted: true,
           timestamp: timeStr,
-          status: 'delivered'
+          status: socket?.connected ? 'delivered' : 'queued'
         };
         setMessages(prev => [...prev, optimisticMsg]);
 
-        socket.emit('send-message', {
+        const payload = {
           tempId,
           chatId,
           senderId: currentUser.id,
@@ -666,11 +1091,17 @@ export default function ChatRoom({
           senderPhone: currentUser.phone || '',
           senderAvatar: currentUser.avatar || '',
           text: `🎤 Voice message (${durationStr})`,
+          transcript: capturedTranscript || '',
           mediaUrl: reader.result,
           type: 'audio',
           encrypted: true,
           recipientId: isGroup ? null : chat.id
-        });
+        };
+        if (socket?.connected) {
+          socket.emit('send-message', payload);
+        } else {
+          enqueueOfflineMessage(payload);
+        }
       };
       reader.readAsDataURL(audioBlob);
     };
@@ -785,6 +1216,34 @@ export default function ChatRoom({
       action: () => setShowEventModal(true)
     },
     {
+      id: 'location',
+      label: 'Location',
+      icon: MapPin,
+      color: '#16a34a',
+      action: () => handleShareLocation()
+    },
+    {
+      id: 'upi',
+      label: 'UPI Pay / Request',
+      icon: IndianRupee,
+      color: '#059669',
+      action: () => setShowUpiModal(true)
+    },
+    {
+      id: 'schedule',
+      label: 'Schedule Message',
+      icon: Clock,
+      color: '#8b5cf6',
+      action: () => setShowScheduleModal(true)
+    },
+    {
+      id: 'contract',
+      label: 'Chat Contract',
+      icon: Handshake,
+      color: '#0284c7',
+      action: () => setShowContractModal(true)
+    },
+    {
       id: 'sticker',
       label: 'New sticker',
       icon: SmilePlus,
@@ -849,8 +1308,8 @@ export default function ChatRoom({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        borderBottom: '1px solid rgba(255, 255, 255, 0.75)',
-        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        borderBottom: '1px solid var(--glass-border)',
+        backgroundColor: 'var(--glass-bg-header)',
         backdropFilter: 'blur(24px) saturate(180%)',
         WebkitBackdropFilter: 'blur(24px) saturate(180%)',
         zIndex: 50,
@@ -913,7 +1372,10 @@ export default function ChatRoom({
                   gap: '6px'
                 }}>
                   {isGroup ? (
-                    chat.name
+                    <>
+                      {chat.isChannel && <Megaphone size={13} color="#0284c7" />}
+                      <span>{chat.name}</span>
+                    </>
                   ) : savedContactName ? (
                     <>
                       <span style={{ fontWeight: '800', color: 'var(--text-primary)' }}>{savedContactName}</span>
@@ -925,12 +1387,7 @@ export default function ChatRoom({
                     </>
                   ) : chat.phone ? (
                     <>
-                      <span>{chat.phone}</span>
-                      {chat.name && chat.name !== chat.phone && (
-                        <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '400' }}>
-                          ~{chat.name}
-                        </span>
-                      )}
+                      <span>{resolvedHeaderName}</span>
                       <button 
                         onClick={(e) => {
                           e.stopPropagation();
@@ -954,19 +1411,14 @@ export default function ChatRoom({
                       </button>
                     </>
                   ) : (
-                    chat.name || 'User'
+                    resolvedHeaderName
                   )}
                 </h2>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowSecurityModal(true);
-                  }}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', flexShrink: 0 }}
-                  title="Verify End-to-End Encryption"
-                >
-                  <Lock size={12} color="#16a34a" />
-                </button>
+                {chatSettings?.disappearDurationMs > 0 && (
+                  <span className="glass-pill" style={{ padding: '1px 6px', fontSize: '9px', fontWeight: '800', color: '#8b5cf6' }}>
+                    ⏱️ {chatSettings.disappearDurationMs >= 604800000 ? '7d' : '24h'}
+                  </span>
+                )}
               </div>
 
               <span style={{ 
@@ -1019,12 +1471,20 @@ export default function ChatRoom({
             <Video size={17} color="#0284c7" />
           </button>
           <button 
-            onClick={() => setShowProfileModal(true)}
+            onClick={() => handleRunAiSummary()}
             className="glass-btn" 
-            style={{ width: '36px', height: '36px' }}
-            title="More Options"
+            style={{ width: '34px', height: '34px' }}
+            title="AI Chat Summary"
           >
-            <MoreVertical size={17} color="var(--text-secondary)" />
+            <Sparkles size={16} color="#0284c7" />
+          </button>
+          <button 
+            onClick={() => setShowOptionsModal(true)}
+            className="glass-btn" 
+            style={{ width: '34px', height: '34px' }}
+            title="Smart Chat Controls & Settings"
+          >
+            <MoreVertical size={16} color="var(--text-secondary)" />
           </button>
         </div>
       </header>
@@ -1033,8 +1493,8 @@ export default function ChatRoom({
       {isSearchOpen && (
         <div style={{
           padding: '8px 16px',
-          backgroundColor: 'rgba(255, 255, 255, 0.98)',
-          borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+          backgroundColor: 'var(--glass-bg-header)',
+          borderBottom: '1px solid var(--glass-border-subtle)',
           display: 'flex',
           alignItems: 'center',
           gap: '10px',
@@ -1068,6 +1528,57 @@ export default function ChatRoom({
         </div>
       )}
 
+      {/* PINNED MESSAGE BANNER */}
+      {chatSettings?.pinnedMessage && (
+        <div style={{
+          padding: '6px 14px',
+          backgroundColor: 'rgba(2, 132, 199, 0.1)',
+          borderBottom: '1px solid rgba(2, 132, 199, 0.25)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px',
+          fontSize: '12px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+            <Pin size={13} color="#0284c7" style={{ flexShrink: 0 }} />
+            <span style={{ fontWeight: '700', color: '#0284c7', flexShrink: 0 }}>Pinned:</span>
+            <span style={{ color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {chatSettings.pinnedMessage.text || `[${chatSettings.pinnedMessage.type}]`}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => socket.emit('pin-message', { chatId, messageId: chatSettings.pinnedMessage.id, userId: currentUser.id })}
+            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px' }}
+            title="Unpin message"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {/* STARRED FILTER / TRANSLATE / REJECTION TOAST BANNER */}
+      {(showStarredOnly || autoTranslateLang !== 'off' || rejectionToast) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '6px 14px', backgroundColor: 'var(--glass-bg-subtle)', borderBottom: '1px solid var(--glass-border-subtle)' }}>
+          {showStarredOnly && (
+            <button type="button" onClick={() => setShowStarredOnly(false)} className="glass-pill" style={{ padding: '2px 10px', fontSize: '11px', fontWeight: '700', color: '#eab308', cursor: 'pointer' }}>
+              ⭐ Showing Starred Only (Clear ✕)
+            </button>
+          )}
+          {autoTranslateLang !== 'off' && (
+            <span className="glass-pill" style={{ padding: '2px 10px', fontSize: '11px', fontWeight: '700', color: '#0284c7' }}>
+              🌐 Auto-Translate: {SUPPORTED_LANGUAGES.find(l => l.code === autoTranslateLang)?.name || autoTranslateLang}
+            </span>
+          )}
+          {rejectionToast && (
+            <span className="glass-pill" style={{ padding: '2px 10px', fontSize: '11px', fontWeight: '700', color: '#059669' }}>
+              {rejectionToast}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* CHAT MESSAGES THREAD */}
       <div 
         ref={messagesContainerRef}
@@ -1077,37 +1588,23 @@ export default function ChatRoom({
           padding: '16px',
           display: 'flex',
           flexDirection: 'column',
-          gap: '10px'
+          gap: '10px',
+          background: (WALLPAPER_PRESETS.find(w => w.id === chatWallpaper)?.bg) || 'transparent'
         }}
       >
-        {/* End-to-End Encryption Notice Badge */}
-        <div style={{ textAlign: 'center', margin: '4px 0 10px 0' }}>
-          <span 
-            onClick={() => setShowSecurityModal(true)}
-            className="glass-pill" 
-            style={{ 
-              padding: '6px 14px', 
-              fontSize: '11px', 
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px'
-            }}
-          >
-            <Lock size={11} color="#16a34a" /> Messages are end-to-end encrypted
-          </span>
-        </div>
 
         {(() => {
-          const displayedMessages = searchQuery.trim() 
-            ? messages.filter(m => (m.text || '').toLowerCase().includes(searchQuery.toLowerCase()))
+          const baseList = showStarredOnly
+            ? messages.filter(m => Array.isArray(m.starredBy) && m.starredBy.includes(currentUser.id))
             : messages;
+          const displayedMessages = searchQuery.trim() 
+            ? baseList.filter(m => (m.text || '').toLowerCase().includes(searchQuery.toLowerCase()))
+            : baseList;
 
-          if (displayedMessages.length === 0 && searchQuery.trim()) {
+          if (displayedMessages.length === 0 && (searchQuery.trim() || showStarredOnly)) {
             return (
               <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: '13px' }}>
-                No messages found matching "<strong>{searchQuery}</strong>"
+                {showStarredOnly ? 'No starred messages in this chat yet.' : <>No messages found matching "<strong>{searchQuery}</strong>"</>}
               </div>
             );
           }
@@ -1127,24 +1624,26 @@ export default function ChatRoom({
                   marginBottom: msg.reactions && Object.keys(msg.reactions).length > 0 ? '8px' : '0'
                 }}
               >
-                {/* WhatsApp Floating Reaction Bar on active message */}
+                {/* Floating Emoji & Full Message Action Bar */}
                 {isMenuActive && (
                   <div 
                     className="glass-panel"
                     style={{
                       position: 'absolute',
-                      top: '-38px',
+                      top: '-54px',
                       right: isMe ? '4px' : 'auto',
                       left: isMe ? 'auto' : '4px',
                       display: 'flex',
+                      flexWrap: 'wrap',
                       alignItems: 'center',
-                      gap: '6px',
-                      padding: '3px 8px',
-                      borderRadius: '20px',
-                      backgroundColor: 'rgba(255, 255, 255, 0.98)',
-                      boxShadow: '0 4px 14px rgba(0, 0, 0, 0.15)',
-                      border: '1px solid rgba(0, 0, 0, 0.1)',
-                      zIndex: 30
+                      gap: '5px',
+                      maxWidth: '295px',
+                      padding: '4px 9px',
+                      borderRadius: '18px',
+                      backgroundColor: 'var(--glass-bg-header)',
+                      boxShadow: '0 6px 20px rgba(0, 0, 0, 0.2)',
+                      border: '1px solid var(--glass-border)',
+                      zIndex: 35
                     }}
                   >
                     {['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) => (
@@ -1154,37 +1653,107 @@ export default function ChatRoom({
                           e.stopPropagation();
                           handleReact(msg.id, emoji);
                         }}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          fontSize: '17px',
-                          cursor: 'pointer',
-                          padding: '1px 2px',
-                          lineHeight: 1
-                        }}
+                        style={{ background: 'none', border: 'none', fontSize: '16px', cursor: 'pointer', padding: '1px', lineHeight: 1 }}
                       >
                         {emoji}
                       </button>
                     ))}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setReplyingTo(msg);
+                        setEditingMsg(null);
+                        setActiveMessageMenu(null);
+                      }}
+                      title="Reply"
+                      style={{ background: 'none', border: 'none', color: '#0284c7', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                    >
+                      <Reply size={14} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setForwardMsg(msg);
+                        setActiveMessageMenu(null);
+                      }}
+                      title="Forward"
+                      style={{ background: 'none', border: 'none', color: '#0284c7', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                    >
+                      <Forward size={14} />
+                    </button>
                     {msg.text && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleTranslateMessage(msg.id, msg.text);
+                          navigator.clipboard?.writeText(msg.text).catch(() => {});
+                          setActiveMessageMenu(null);
                         }}
-                        title="Translate (Hindi ↔ English)"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#0284c7',
-                          cursor: 'pointer',
-                          padding: '2px 4px',
-                          display: 'flex',
-                          alignItems: 'center'
-                        }}
+                        title="Copy"
+                        style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '2px', display: 'flex' }}
                       >
-                        <Languages size={15} />
+                        <Copy size={14} />
                       </button>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        socket.emit('star-message', { chatId, messageId: msg.id, userId: currentUser.id });
+                        setActiveMessageMenu(null);
+                      }}
+                      title="Star / Save Message"
+                      style={{ background: 'none', border: 'none', color: '#eab308', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                    >
+                      <Star size={14} fill={Array.isArray(msg.starredBy) && msg.starredBy.includes(currentUser.id) ? '#eab308' : 'none'} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        socket.emit('pin-message', { chatId, messageId: msg.id, userId: currentUser.id });
+                        setActiveMessageMenu(null);
+                      }}
+                      title="Pin / Unpin Message"
+                      style={{ background: 'none', border: 'none', color: '#8b5cf6', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                    >
+                      <Pin size={14} />
+                    </button>
+                    {isMe && msg.type === 'text' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingMsg(msg);
+                          setReplyingTo(null);
+                          setInputText(msg.text || '');
+                          setActiveMessageMenu(null);
+                        }}
+                        title="Edit Message"
+                        style={{ background: 'none', border: 'none', color: '#059669', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    )}
+                    {(msg.text || msg.transcript) && (
+                      <>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTranslateMessage(msg.id, msg.text || msg.transcript);
+                          }}
+                          title="Translate"
+                          style={{ background: 'none', border: 'none', color: '#0284c7', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                        >
+                          <Languages size={14} />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRunTruthCheck(msg);
+                          }}
+                          title="Truth Check (Fact-Check Forwarded Claims)"
+                          style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                        >
+                          <ShieldCheck size={14} />
+                        </button>
+                      </>
                     )}
                     {isMe && (
                       <button
@@ -1192,16 +1761,8 @@ export default function ChatRoom({
                           e.stopPropagation();
                           handleDeleteMessage(msg.id);
                         }}
-                        title="Delete message"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#ef4444',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          display: 'flex',
-                          alignItems: 'center'
-                        }}
+                        title="Delete for everyone"
+                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '2px', display: 'flex' }}
                       >
                         <Trash2 size={14} />
                       </button>
@@ -1216,12 +1777,36 @@ export default function ChatRoom({
                     maxWidth: '82%',
                     padding: isAudio ? '8px 12px' : '10px 14px',
                     borderRadius: isMe ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
-                    boxShadow: msg.isUrgent ? '0 0 14px rgba(239, 68, 68, 0.45)' : 'var(--glass-shadow-sm)',
+                    boxShadow: msg.isUrgent ? '0 0 14px rgba(239, 68, 68, 0.45)' : undefined,
                     border: msg.isUrgent ? '1.5px solid #ef4444' : undefined,
                     position: 'relative',
                     cursor: 'pointer'
                   }}
                 >
+                {/* Forwarded Tag */}
+                {msg.isForwarded && (
+                  <div style={{ fontSize: '10px', fontStyle: 'italic', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '3px' }}>
+                    <Forward size={10} /> Forwarded
+                  </div>
+                )}
+
+                {/* Replied-To Quote Preview */}
+                {msg.replyTo && (
+                  <div style={{
+                    padding: '4px 8px',
+                    marginBottom: '5px',
+                    borderRadius: '8px',
+                    backgroundColor: 'rgba(2, 132, 199, 0.1)',
+                    borderLeft: '3px solid #0284c7',
+                    fontSize: '11px'
+                  }}>
+                    <div style={{ fontWeight: '800', color: '#0284c7' }}>{msg.replyTo.senderName}</div>
+                    <div style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '220px' }}>
+                      {msg.replyTo.text}
+                    </div>
+                  </div>
+                )}
+
                 {/* Urgent Priority Alert Badge */}
                 {msg.isUrgent && (
                   <div style={{
@@ -1239,7 +1824,7 @@ export default function ChatRoom({
                     <Zap size={11} fill="#ef4444" /> URGENT BUZZ
                   </div>
                 )}
-                {/* Group sender tag */}
+                {/* Group sender tag resolved from Saved Contacts */}
                 {isGroup && !isMe && (
                   <span style={{
                     fontSize: '11px',
@@ -1249,7 +1834,7 @@ export default function ChatRoom({
                     marginBottom: '2px',
                     padding: msg.type === 'image' ? '4px 6px' : '0'
                   }}>
-                    {msg.senderPhone ? `${msg.senderPhone} (~${msg.senderName})` : msg.senderName}
+                    {resolveDisplayName({ name: msg.senderName, phone: msg.senderPhone }, savedContactsMap, true)}
                   </span>
                 )}
 
@@ -1343,78 +1928,119 @@ export default function ChatRoom({
                   </div>
                 )}
 
-                {/* 4. AUDIO / VOICE NOTE MESSAGE */}
+                {/* 4. AUDIO / VOICE NOTE MESSAGE + SPEECH-TO-TEXT + ACTION */}
                 {msg.type === 'audio' && msg.mediaUrl && (
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '4px 0',
-                    minWidth: '180px'
-                  }}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        togglePlayAudio(msg.id, msg.mediaUrl);
-                      }}
-                      style={{
-                        width: '38px',
-                        height: '38px',
-                        borderRadius: '50%',
-                        backgroundColor: isMe ? '#0284c7' : '#0f172a',
-                        color: '#ffffff',
-                        border: 'none',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        cursor: 'pointer',
-                        flexShrink: 0
-                      }}
-                    >
-                      {playingAudioId === msg.id ? <Pause size={17} /> : <Play size={17} style={{ marginLeft: '2px' }} />}
-                    </button>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      padding: '4px 0',
+                      minWidth: '185px'
+                    }}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePlayAudio(msg.id, msg.mediaUrl);
+                        }}
+                        style={{
+                          width: '38px',
+                          height: '38px',
+                          borderRadius: '50%',
+                          backgroundColor: isMe ? '#0284c7' : '#0f172a',
+                          color: '#ffffff',
+                          border: 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          flexShrink: 0
+                        }}
+                      >
+                        {playingAudioId === msg.id ? <Pause size={17} /> : <Play size={17} style={{ marginLeft: '2px' }} />}
+                      </button>
 
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '3px', height: '20px' }}>
-                        {[8, 16, 12, 20, 14, 18, 10, 22, 16, 12, 18, 14, 10, 16, 8].map((h, i) => (
-                          <span 
-                            key={i} 
-                            style={{
-                              width: '3px',
-                              height: `${h}px`,
-                              backgroundColor: playingAudioId === msg.id && i % 3 === 0 ? '#0284c7' : 'rgba(100, 116, 139, 0.45)',
-                              borderRadius: '2px',
-                              transition: 'all 0.15s ease'
-                            }} 
-                          />
-                        ))}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px', height: '20px' }}>
+                          {[8, 16, 12, 20, 14, 18, 10, 22, 16, 12, 18, 14, 10, 16, 8].map((h, i) => (
+                            <span 
+                              key={i} 
+                              style={{
+                                width: '3px',
+                                height: `${h}px`,
+                                backgroundColor: playingAudioId === msg.id && i % 3 === 0 ? '#0284c7' : 'rgba(100, 116, 139, 0.45)',
+                                borderRadius: '2px',
+                                transition: 'all 0.15s ease'
+                              }} 
+                            />
+                          ))}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px', gap: '4px' }}>
+                          <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: '600' }}>
+                            {msg.text || 'Voice Note'}
+                          </span>
+                          <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                            {msg.transcript && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShowTranscripts(p => ({ ...p, [msg.id]: !p[msg.id] }));
+                                }}
+                                className="glass-pill"
+                                style={{ padding: '1px 6px', fontSize: '9px', fontWeight: '800', color: '#059669', cursor: 'pointer' }}
+                              >
+                                📝 Text
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleAudioSpeed();
+                              }}
+                              className="glass-pill"
+                              style={{
+                                padding: '1px 7px',
+                                fontSize: '10px',
+                                fontWeight: '800',
+                                backgroundColor: 'rgba(2, 132, 199, 0.15)',
+                                color: '#0284c7',
+                                border: '1px solid rgba(2, 132, 199, 0.3)',
+                                cursor: 'pointer'
+                              }}
+                              title="Change playback speed (1x, 1.5x, 2x)"
+                            >
+                              {audioPlaybackRate}x
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px' }}>
-                        <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: '600' }}>
-                          {msg.text || 'Voice Note'}
-                        </span>
+                    </div>
+
+                    {msg.transcript && showTranscripts[msg.id] && (
+                      <div style={{ fontSize: '11px', padding: '5px 8px', borderRadius: '8px', backgroundColor: 'rgba(2,132,199,0.08)', color: 'var(--text-primary)' }}>
+                        <strong>Voice → Text:</strong> "{msg.transcript}"
+                      </div>
+                    )}
+
+                    {msg.transcript && (() => {
+                      const voiceAct = extractSmartAction(msg.transcript);
+                      if (!voiceAct) return null;
+                      return (
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleToggleAudioSpeed();
+                            handleCreateQuickReminder(msg.id, voiceAct.title, voiceAct.suggestedTimeMs, msg.transcript);
                           }}
                           className="glass-pill"
-                          style={{
-                            padding: '1px 7px',
-                            fontSize: '10px',
-                            fontWeight: '800',
-                            backgroundColor: 'rgba(2, 132, 199, 0.15)',
-                            color: '#0284c7',
-                            border: '1px solid rgba(2, 132, 199, 0.3)',
-                            cursor: 'pointer'
-                          }}
-                          title="Change playback speed (1x, 1.5x, 2x)"
+                          style={{ alignSelf: 'flex-start', padding: '3px 9px', fontSize: '10px', fontWeight: '800', color: reminderSavedIds[msg.id] ? '#16a34a' : '#8b5cf6', cursor: 'pointer' }}
                         >
-                          {audioPlaybackRate}x
+                          {reminderSavedIds[msg.id] ? '✅ Reminder Saved' : `⏰ ${voiceAct.label}`}
                         </button>
-                      </div>
-                    </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -1455,7 +2081,7 @@ export default function ChatRoom({
                   </div>
                 )}
 
-                {/* 6. POLL CARD MESSAGE */}
+                {/* 6. POLL / ANONYMOUS VOTE CARD MESSAGE */}
                 {msg.type === 'poll' && msg.pollData && (
                   <div style={{
                     padding: '8px 4px',
@@ -1464,11 +2090,18 @@ export default function ChatRoom({
                     flexDirection: 'column',
                     gap: '8px'
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <BarChart2 size={16} color="#eab308" />
-                      <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
-                        {msg.pollData.question}
-                      </strong>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <BarChart2 size={16} color="#eab308" />
+                        <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
+                          {msg.pollData.question}
+                        </strong>
+                      </div>
+                      {msg.pollData.isAnonymous && (
+                        <span className="glass-pill" style={{ padding: '1px 6px', fontSize: '9px', fontWeight: '800', color: '#8b5cf6' }}>
+                          🕵️ Secret
+                        </span>
+                      )}
                     </div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -1476,12 +2109,18 @@ export default function ChatRoom({
                         const totalVotes = msg.pollData.options.reduce((acc, o) => acc + (o.votes?.length || 0), 0);
                         const optVotes = opt.votes?.length || 0;
                         const pct = totalVotes > 0 ? Math.round((optVotes / totalVotes) * 100) : 0;
-                        const hasVoted = opt.votes?.includes(currentUser.id);
+                        const hasVoted = opt.votes?.includes(currentUser.id) || (msg.pollData.isAnonymous && anonVotes[msg.id] === opt.id);
 
                         return (
                           <div 
                             key={opt.id}
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (msg.pollData.isAnonymous) {
+                                const nextAnon = { ...anonVotes, [msg.id]: anonVotes[msg.id] === opt.id ? null : opt.id };
+                                setAnonVotes(nextAnon);
+                                localStorage.setItem(`glasschat_anon_votes_${currentUser.id}`, JSON.stringify(nextAnon));
+                              }
                               socket.emit('poll-vote', {
                                 chatId,
                                 messageId: msg.id,
@@ -1493,8 +2132,8 @@ export default function ChatRoom({
                               position: 'relative',
                               padding: '8px 12px',
                               borderRadius: '10px',
-                              border: hasVoted ? '1.5px solid #0284c7' : '1px solid rgba(203, 213, 225, 0.8)',
-                              backgroundColor: 'rgba(255, 255, 255, 0.7)',
+                              border: hasVoted ? '1.5px solid #0284c7' : '1px solid var(--glass-border)',
+                              backgroundColor: 'var(--glass-bg-subtle)',
                               cursor: 'pointer',
                               overflow: 'hidden'
                             }}
@@ -1505,7 +2144,7 @@ export default function ChatRoom({
                               left: 0,
                               bottom: 0,
                               width: `${pct}%`,
-                              backgroundColor: hasVoted ? 'rgba(2, 132, 199, 0.2)' : 'rgba(203, 213, 225, 0.35)',
+                              backgroundColor: hasVoted ? 'rgba(2, 132, 199, 0.22)' : 'rgba(148, 163, 184, 0.2)',
                               transition: 'width 0.3s ease',
                               zIndex: 1
                             }} />
@@ -1628,23 +2267,205 @@ export default function ChatRoom({
                   </div>
                 )}
 
-                {/* 10. STANDARD TEXT (if not audio/poll/event/document/call_log) */}
-                {(!['audio', 'poll', 'event', 'document', 'sticker', 'contact', 'image', 'video', 'call_log'].includes(msg.type) || (['image', 'video', 'document'].includes(msg.type) && msg.text && !msg.text.startsWith('📷') && !msg.text.startsWith('📄') && !msg.text.startsWith('🎥'))) && (
-                  <p style={{
-                    fontSize: '14px',
-                    lineHeight: '1.45',
-                    color: !isMe ? 'var(--text-primary)' : (
-                      msg.status === 'seen' || msg.status === 'read' ? '#0284c7' :
-                      msg.status === 'delivered' ? '#059669' : '#ef4444'
-                    ),
-                    fontWeight: isMe ? '500' : '400',
-                    margin: 0,
-                    wordBreak: 'break-word',
-                    padding: msg.type === 'image' ? '2px 6px' : '0'
-                  }}>
-                    {msg.text}
-                  </p>
+                {/* 10. LOCATION SHARE CARD */}
+                {msg.type === 'location' && msg.locationData && (
+                  <a
+                    href={`https://maps.google.com/?q=${msg.locationData.lat},${msg.locationData.lng}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      padding: '10px 12px',
+                      borderRadius: '14px',
+                      backgroundColor: isMe ? 'rgba(2,132,199,0.1)' : 'rgba(16,185,129,0.1)',
+                      textDecoration: 'none',
+                      minWidth: '210px'
+                    }}
+                  >
+                    <div style={{ width: '38px', height: '38px', borderRadius: '10px', backgroundColor: '#16a34a', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <MapPin size={19} />
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: '13px', fontWeight: '800', color: 'var(--text-primary)' }}>
+                        {msg.locationData.label || 'Live GPS Location'}
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#0284c7', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        {msg.locationData.lat.toFixed(4)}, {msg.locationData.lng.toFixed(4)} <ExternalLink size={10} />
+                      </div>
+                    </div>
+                  </a>
                 )}
+
+                {/* 11. IN-CHAT UPI PAYMENT CARD */}
+                {msg.type === 'upi' && msg.upiData && (
+                  <div style={{
+                    padding: '10px 12px',
+                    borderRadius: '14px',
+                    backgroundColor: msg.upiData.status === 'paid' ? 'rgba(22,163,74,0.12)' : 'rgba(2,132,199,0.09)',
+                    border: `1px solid ${msg.upiData.status === 'paid' ? '#16a34a' : 'rgba(2,132,199,0.35)'}`,
+                    minWidth: '220px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '11px', fontWeight: '800', color: '#16a34a', textTransform: 'uppercase' }}>
+                        💸 UPI {msg.upiData.mode === 'request' ? 'Payment Request' : 'Payment'}
+                      </span>
+                      <span className="glass-pill" style={{ padding: '1px 7px', fontSize: '10px', fontWeight: '800', color: msg.upiData.status === 'paid' ? '#16a34a' : '#d97706' }}>
+                        {msg.upiData.status === 'paid' ? '✅ PAID' : 'Pending'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '20px', fontWeight: '900', color: 'var(--text-primary)' }}>
+                      ₹{msg.upiData.amount}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      UPI: <strong>{msg.upiData.vpa}</strong> • {msg.upiData.note}
+                    </div>
+                    {msg.upiData.status !== 'paid' && (
+                      <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                        <a
+                          href={`upi://pay?pa=${encodeURIComponent(msg.upiData.vpa)}&pn=${encodeURIComponent(resolvedHeaderName)}&am=${msg.upiData.amount}&cu=INR&tn=${encodeURIComponent(msg.upiData.note || 'GlassChat')}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="glass-btn glass-btn-primary"
+                          style={{ flex: 1, height: '30px', borderRadius: '10px', fontSize: '11px', fontWeight: '800', textDecoration: 'none' }}
+                        >
+                          Pay via UPI App
+                        </a>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            socket.emit('upi-action', { chatId, messageId: msg.id, status: 'paid', userId: currentUser.id });
+                          }}
+                          className="glass-btn"
+                          style={{ height: '30px', padding: '0 10px', borderRadius: '10px', fontSize: '11px', fontWeight: '700', color: '#16a34a' }}
+                        >
+                          Mark Paid
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 12. CHAT CONTRACT / PROMISE CARD */}
+                {msg.type === 'contract' && msg.contractData && (
+                  <div style={{
+                    padding: '10px 12px',
+                    borderRadius: '14px',
+                    backgroundColor: msg.contractData.status === 'completed' ? 'rgba(22,163,74,0.12)' : 'rgba(14,165,233,0.1)',
+                    border: '1px solid rgba(2,132,199,0.35)',
+                    minWidth: '220px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                      <span style={{ fontSize: '11px', fontWeight: '800', color: '#0284c7', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Handshake size={14} /> CHAT CONTRACT
+                      </span>
+                      <span className="glass-pill" style={{ padding: '1px 7px', fontSize: '10px', fontWeight: '800', color: msg.contractData.status === 'completed' ? '#16a34a' : '#0284c7' }}>
+                        {msg.contractData.status === 'completed' ? '✅ Fulfilled' : msg.contractData.status === 'accepted' ? '🤝 Accepted' : '⏳ Proposed'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '13px', fontWeight: '800', color: 'var(--text-primary)' }}>
+                      {msg.contractData.title}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      Due: <strong>{msg.contractData.dueText}</strong>{msg.contractData.amount ? ` • ${msg.contractData.amount}` : ''}
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px', marginTop: '2px', flexWrap: 'wrap' }}>
+                      {msg.contractData.status === 'pending' && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            socket.emit('contract-action', { chatId, messageId: msg.id, action: 'accept', userId: currentUser.id, userName: currentUser.name });
+                          }}
+                          className="glass-btn glass-btn-primary"
+                          style={{ height: '28px', padding: '0 10px', borderRadius: '10px', fontSize: '11px', fontWeight: '700' }}
+                        >
+                          Accept Promise 🤝
+                        </button>
+                      )}
+                      {msg.contractData.status !== 'completed' && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            socket.emit('contract-action', { chatId, messageId: msg.id, action: 'complete', userId: currentUser.id, userName: currentUser.name });
+                          }}
+                          className="glass-btn"
+                          style={{ height: '28px', padding: '0 10px', borderRadius: '10px', fontSize: '11px', fontWeight: '700', color: '#16a34a' }}
+                        >
+                          Mark Done ✅
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCreateQuickReminder(msg.id, `Promise: ${msg.contractData.title}`, Date.now() + 3600000, msg.contractData.dueText);
+                        }}
+                        className="glass-btn"
+                        style={{ height: '28px', padding: '0 8px', borderRadius: '10px', fontSize: '11px', fontWeight: '700', color: reminderSavedIds[msg.id] ? '#16a34a' : '#8b5cf6' }}
+                      >
+                        {reminderSavedIds[msg.id] ? '✅ Reminded' : '⏰ Remind'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 13. STANDARD TEXT (with Family Safe unknown link protection + Smart Action detector) */}
+                {(!['audio', 'poll', 'event', 'document', 'sticker', 'contact', 'image', 'video', 'call_log', 'location', 'upi', 'contract'].includes(msg.type) || (['image', 'video', 'document'].includes(msg.type) && msg.text && !msg.text.startsWith('📷') && !msg.text.startsWith('📄') && !msg.text.startsWith('🎥'))) && (() => {
+                  const shouldMaskLinks = Boolean(
+                    currentUser?.familySafe?.enabled &&
+                    currentUser?.familySafe?.blockUnknownLinks &&
+                    !isMe &&
+                    !isSavedNumber(msg.senderPhone || chat.phone, savedContactsMap)
+                  );
+                  const displayText = shouldMaskLinks ? maskUnknownLinks(msg.text || '') : (msg.text || '');
+                  const smartAction = msg.type === 'text' ? extractSmartAction(msg.text || '') : null;
+                  return (
+                    <>
+                      <p style={{
+                        fontSize: '14px',
+                        lineHeight: '1.45',
+                        color: !isMe ? 'var(--text-primary)' : (
+                          msg.status === 'seen' || msg.status === 'read' ? '#0284c7' :
+                          msg.status === 'delivered' ? '#059669' : '#ef4444'
+                        ),
+                        fontWeight: isMe ? '500' : '400',
+                        margin: 0,
+                        wordBreak: 'break-word',
+                        padding: msg.type === 'image' ? '2px 6px' : '0'
+                      }}>
+                        {displayText}
+                      </p>
+                      {shouldMaskLinks && displayText !== msg.text && (
+                        <div style={{ fontSize: '10px', color: '#d97706', fontWeight: '700', marginTop: '3px' }}>
+                          👨‍👩‍👧 Link masked by Family Safe Mode
+                        </div>
+                      )}
+                      {smartAction && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCreateQuickReminder(msg.id, smartAction.title, smartAction.suggestedTimeMs, msg.text);
+                          }}
+                          className="glass-pill"
+                          style={{ marginTop: '4px', padding: '2px 9px', fontSize: '10px', fontWeight: '800', color: reminderSavedIds[msg.id] ? '#16a34a' : '#0284c7', cursor: 'pointer' }}
+                        >
+                          {reminderSavedIds[msg.id] ? '✅ Smart Reminder Active' : `⏰ ${smartAction.label}`}
+                        </button>
+                      )}
+                    </>
+                  );
+                })()}
 
                 {/* Inline Instant Translation Result */}
                 {translatedMessages[msg.id] && (
@@ -1664,7 +2485,7 @@ export default function ChatRoom({
                   </div>
                 )}
 
-                {/* Timestamp & Status Ticks */}
+                {/* Timestamp, Edited/Starred Badges & Status Ticks */}
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -1673,12 +2494,20 @@ export default function ChatRoom({
                   marginTop: '3px',
                   padding: msg.type === 'image' ? '0 6px 2px 0' : '0'
                 }}>
+                  {Array.isArray(msg.starredBy) && msg.starredBy.includes(currentUser.id) && (
+                    <Star size={10} color="#eab308" fill="#eab308" />
+                  )}
+                  {msg.isEdited && (
+                    <span style={{ fontSize: '9px', fontStyle: 'italic', color: 'var(--text-muted)' }}>edited</span>
+                  )}
                   <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
                     {(msg.rawTime || msg.createdAt) ? formatISTTime(msg.rawTime || msg.createdAt) : (msg.timestamp || 'Now')}
                   </span>
                   {isMe && (
                     <span style={{ display: 'flex', alignItems: 'center', marginLeft: '2px' }}>
-                      {msg.status === 'seen' || msg.status === 'read' ? (
+                      {msg.status === 'queued' ? (
+                        <Clock size={12} color="#f59e0b" title="Queued offline — will send once online" />
+                      ) : msg.status === 'seen' || msg.status === 'read' ? (
                         <CheckCheck size={15} color="#34B7F1" title="Seen (Blue Double Tick)" />
                       ) : msg.status === 'delivered' ? (
                         <CheckCheck size={15} color="#10b981" title="Delivered (Green Double Tick - Data ON)" />
@@ -1728,14 +2557,118 @@ export default function ChatRoom({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* SMART REPLIES + MOOD CHAT GUARD + REPLY/EDIT BANNER */}
+      {!isChannelRestricted && (() => {
+        const lastMsg = messages[messages.length - 1];
+        const smartReplies = (!editingMsg && !inputText.trim() && lastMsg)
+          ? generateSmartReplies(lastMsg, currentUser.id)
+          : [];
+        const moodAdvice = (moodGuardEnabled && inputText.trim().length >= 5)
+          ? analyzeMoodTone(inputText)
+          : null;
+
+        if (!smartReplies.length && !moodAdvice && !replyingTo && !editingMsg) return null;
+        return (
+          <div style={{
+            padding: '6px 12px',
+            backgroundColor: 'var(--glass-bg-header)',
+            borderTop: '1px solid var(--glass-border-subtle)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            zIndex: 41
+          }}>
+            {smartReplies.length > 0 && (
+              <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px' }}>
+                <span style={{ fontSize: '10px', fontWeight: '800', color: '#0284c7', alignSelf: 'center', whiteSpace: 'nowrap' }}>
+                  ✨ AI Reply:
+                </span>
+                {smartReplies.map((sr, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => emitMessage({ text: sr, type: 'text' })}
+                    className="glass-pill"
+                    style={{ padding: '4px 10px', fontSize: '11px', fontWeight: '700', color: 'var(--text-primary)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                  >
+                    {sr}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {moodAdvice && moodAdvice.isHarsh && (
+              <div style={{
+                padding: '6px 10px',
+                borderRadius: '12px',
+                backgroundColor: 'rgba(245, 158, 11, 0.14)',
+                border: '1px solid rgba(245, 158, 11, 0.4)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+                fontSize: '11px'
+              }}>
+                <span style={{ color: '#d97706', fontWeight: '700' }}>
+                  😊 {moodAdvice.reason}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setInputText(moodAdvice.politeSuggestion)}
+                  className="glass-btn glass-btn-primary"
+                  style={{ height: '24px', padding: '0 10px', borderRadius: '10px', fontSize: '10px', fontWeight: '800', whiteSpace: 'nowrap' }}
+                >
+                  Polite Version ✨
+                </button>
+              </div>
+            )}
+
+            {(replyingTo || editingMsg) && (
+              <div style={{
+                padding: '5px 10px',
+                borderRadius: '10px',
+                backgroundColor: 'rgba(2, 132, 199, 0.1)',
+                borderLeft: '3px solid #0284c7',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: '11px'
+              }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontWeight: '800', color: '#0284c7' }}>
+                    {editingMsg ? '✏️ Editing Message' : `↩️ Replying to ${resolveDisplayName({ name: replyingTo.senderName, phone: replyingTo.senderPhone }, savedContactsMap, true)}`}
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {(editingMsg || replyingTo)?.text}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReplyingTo(null);
+                    if (editingMsg) {
+                      setEditingMsg(null);
+                      setInputText('');
+                    }
+                  }}
+                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px' }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* BOTTOM INPUT BAR & ATTACHMENT MENU */}
       <div 
         className="glass-panel" 
         style={{
           padding: '8px 12px',
           paddingBottom: 'max(8px, env(safe-area-inset-bottom, 8px))',
-          borderTop: '1px solid rgba(255, 255, 255, 0.75)',
-          backgroundColor: 'rgba(255, 255, 255, 0.95)',
+          borderTop: '1px solid var(--glass-border)',
+          backgroundColor: 'var(--glass-bg-header)',
           display: 'flex',
           alignItems: 'center',
           gap: '8px',
@@ -1743,6 +2676,26 @@ export default function ChatRoom({
           zIndex: 40
         }}
       >
+        {isChannelRestricted ? (
+          <div style={{
+            width: '100%',
+            padding: '8px 12px',
+            borderRadius: '16px',
+            backgroundColor: 'rgba(2, 132, 199, 0.1)',
+            color: 'var(--text-secondary)',
+            fontSize: '12px',
+            fontWeight: '700',
+            textAlign: 'center',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '6px'
+          }}>
+            <Megaphone size={15} color="#0284c7" />
+            Only Channel Admins can post in this announcement channel
+          </div>
+        ) : (
+        <>
         {/* Backdrop for closing attachment menu */}
         {showAttachmentMenu && (
           <div 
@@ -1921,7 +2874,7 @@ export default function ChatRoom({
                   }
                   e.target.scrollIntoView({ block: 'nearest' });
                 }}
-                placeholder={isUrgentMode ? "🚨 Send urgent priority buzz..." : "Message..."}
+                placeholder={isUrgentMode ? "🚨 Send urgent priority buzz..." : editingMsg ? "Edit your message..." : "Message..."}
                 className="glass-input"
                 style={{
                   flex: 1,
@@ -1931,10 +2884,6 @@ export default function ChatRoom({
                   fontWeight: '600',
                   padding: '9px 12px',
                   boxSizing: 'border-box',
-                  backgroundColor: 'rgba(255, 255, 255, 0.96)',
-                  color: '#0f172a',
-                  WebkitTextFillColor: '#0f172a',
-                  caretColor: '#0284c7',
                   border: '1.5px solid rgba(2, 132, 199, 0.45)'
                 }}
               />
@@ -1982,6 +2931,8 @@ export default function ChatRoom({
               </button>
             </form>
           </>
+        )}
+        </>
         )}
       </div>
 
@@ -2193,6 +3144,18 @@ export default function ChatRoom({
                 )}
               </div>
 
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderRadius: '12px', backgroundColor: 'rgba(139, 92, 246, 0.08)', border: '1px solid rgba(139, 92, 246, 0.25)', cursor: 'pointer', fontSize: '12px' }}>
+                <span style={{ fontWeight: '700', color: 'var(--text-primary)' }}>
+                  🕵️ Anonymous Voting (Secret Poll)
+                </span>
+                <input
+                  type="checkbox"
+                  checked={isAnonPoll}
+                  onChange={(e) => setIsAnonPoll(e.target.checked)}
+                  style={{ accentColor: '#8b5cf6', width: '16px', height: '16px' }}
+                />
+              </label>
+
               <button 
                 type="submit"
                 className="glass-btn glass-btn-primary"
@@ -2398,6 +3361,57 @@ export default function ChatRoom({
           onClose={() => setShowSecurityModal(false)}
         />
       )}
+
+      {/* SMART FEATURE MODALS (Options, AI Summary, Truth Check, Forward, Schedule, UPI, Contracts) */}
+      <ChatFeatureModals
+        chat={chat}
+        chatId={chatId}
+        currentUser={currentUser}
+        contacts={contacts}
+        savedContactsMap={savedContactsMap}
+        showOptionsModal={showOptionsModal}
+        setShowOptionsModal={setShowOptionsModal}
+        chatSettings={chatSettings}
+        onUpdateDisappearTimer={handleUpdateDisappearTimer}
+        autoTranslateLang={autoTranslateLang}
+        onChangeAutoTranslate={(lang) => {
+          setAutoTranslateLang(lang);
+          localStorage.setItem(`glasschat_autotrans_${chatId}`, lang);
+        }}
+        chatWallpaper={chatWallpaper}
+        onChangeWallpaper={(wp) => {
+          setChatWallpaper(wp);
+          localStorage.setItem(`glasschat_wallpaper_${chatId}`, wp);
+        }}
+        moodGuardEnabled={moodGuardEnabled}
+        onToggleMoodGuard={() => {
+          const next = !moodGuardEnabled;
+          setMoodGuardEnabled(next);
+          localStorage.setItem('glasschat_mood_guard', next ? 'on' : 'off');
+        }}
+        showStarredOnly={showStarredOnly}
+        onToggleStarredOnly={() => setShowStarredOnly(p => !p)}
+        onRunAiSummary={handleRunAiSummary}
+        scheduledList={scheduledList}
+        onCancelScheduled={handleCancelScheduled}
+        onOpenSos={onOpenSos}
+        summaryModal={summaryModal}
+        setSummaryModal={setSummaryModal}
+        truthCheckModal={truthCheckModal}
+        setTruthCheckModal={setTruthCheckModal}
+        forwardMsg={forwardMsg}
+        setForwardMsg={setForwardMsg}
+        onConfirmForward={handleConfirmForward}
+        showScheduleModal={showScheduleModal}
+        setShowScheduleModal={setShowScheduleModal}
+        onConfirmSchedule={handleConfirmSchedule}
+        showUpiModal={showUpiModal}
+        setShowUpiModal={setShowUpiModal}
+        onConfirmUpi={handleConfirmUpi}
+        showContractModal={showContractModal}
+        setShowContractModal={setShowContractModal}
+        onConfirmContract={handleConfirmContract}
+      />
 
       {/* USER PROFILE MODAL */}
       {showProfileModal && (

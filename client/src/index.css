@@ -3,6 +3,7 @@
   
   /* Glass colors - subtle, light, translucent */
   --glass-bg: rgba(255, 255, 255, 0.48);
+  --glass-bg-header: rgba(255, 255, 255, 0.88);
   --glass-bg-hover: rgba(255, 255, 255, 0.65);
   --glass-bg-active: rgba(255, 255, 255, 0.78);
   --glass-bg-subtle: rgba(255, 255, 255, 0.32);
@@ -10,12 +11,21 @@
   --glass-border-subtle: rgba(255, 255, 255, 0.38);
   --glass-shadow: 0 8px 32px 0 rgba(148, 163, 184, 0.12);
   --glass-shadow-lg: 0 16px 48px 0 rgba(100, 116, 139, 0.16);
+  --glass-blur: 20px;
+  --pill-bg: rgba(255, 255, 255, 0.65);
+  --pill-border: rgba(255, 255, 255, 0.8);
+  --input-bg: rgba(255, 255, 255, 0.85);
+  --input-focus-bg: #ffffff;
+  --input-text: #0f172a;
   
-  /* Message bubbles */
-  --bubble-incoming: rgba(255, 255, 255, 0.65);
-  --bubble-incoming-border: rgba(255, 255, 255, 0.85);
-  --bubble-outgoing: rgba(199, 230, 255, 0.62);
-  --bubble-outgoing-border: rgba(147, 197, 253, 0.7);
+  /* Message bubbles (default 100% transparent background & border; adjustable in Settings) */
+  --bubble-incoming: rgba(255, 255, 255, 0);
+  --bubble-incoming-border: rgba(255, 255, 255, 0);
+  --bubble-outgoing: rgba(199, 230, 255, 0);
+  --bubble-outgoing-border: rgba(147, 197, 253, 0);
+  --msg-bg-opacity: 0;
+  --msg-border-opacity: 0;
+  --msg-shadow: none;
   
   /* Text colors */
   --text-primary: #0f172a;
@@ -28,6 +38,64 @@
   --accent-glow: rgba(56, 189, 248, 0.35);
   --danger: rgba(239, 68, 68, 0.88);
   --success: rgba(34, 197, 94, 0.88);
+  --app-backdrop:
+    radial-gradient(at 0% 0%, rgba(224, 242, 254, 0.85) 0px, transparent 50%),
+    radial-gradient(at 100% 0%, rgba(243, 232, 255, 0.8) 0px, transparent 50%),
+    radial-gradient(at 50% 50%, rgba(254, 243, 199, 0.4) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, rgba(236, 253, 245, 0.8) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(224, 231, 255, 0.85) 0px, transparent 50%),
+    #eef3f9;
+}
+
+:root[data-theme="dark"] {
+  --glass-bg: rgba(15, 23, 42, 0.74);
+  --glass-bg-header: rgba(15, 23, 42, 0.9);
+  --glass-bg-hover: rgba(30, 41, 59, 0.82);
+  --glass-bg-active: rgba(30, 41, 59, 0.92);
+  --glass-bg-subtle: rgba(30, 41, 59, 0.56);
+  --glass-border: rgba(148, 163, 184, 0.22);
+  --glass-border-subtle: rgba(148, 163, 184, 0.14);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.45);
+  --glass-shadow-lg: 0 16px 48px 0 rgba(0, 0, 0, 0.6);
+  --pill-bg: rgba(30, 41, 59, 0.75);
+  --pill-border: rgba(148, 163, 184, 0.28);
+  --input-bg: rgba(30, 41, 59, 0.88);
+  --input-focus-bg: rgba(30, 41, 59, 0.98);
+  --input-text: #f8fafc;
+  --bubble-incoming: rgba(30, 41, 59, 0);
+  --bubble-incoming-border: rgba(148, 163, 184, 0);
+  --bubble-outgoing: rgba(3, 105, 161, 0);
+  --bubble-outgoing-border: rgba(56, 189, 248, 0);
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-accent: #38bdf8;
+  --app-backdrop:
+    radial-gradient(at 0% 0%, rgba(14, 116, 144, 0.25) 0px, transparent 50%),
+    radial-gradient(at 100% 0%, rgba(88, 28, 135, 0.28) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, rgba(15, 118, 110, 0.2) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(30, 58, 138, 0.32) 0px, transparent 50%),
+    #0b1120;
+}
+
+:root[data-theme="aurora"] {
+  --bubble-outgoing: rgba(216, 180, 254, 0.48);
+  --bubble-outgoing-border: rgba(168, 85, 247, 0.5);
+  --app-backdrop:
+    radial-gradient(at 0% 0%, rgba(233, 213, 255, 0.9) 0px, transparent 55%),
+    radial-gradient(at 100% 0%, rgba(199, 210, 254, 0.9) 0px, transparent 55%),
+    radial-gradient(at 0% 100%, rgba(204, 251, 241, 0.85) 0px, transparent 50%),
+    #f3e8ff;
+}
+
+:root[data-theme="sunset"] {
+  --bubble-outgoing: rgba(254, 215, 170, 0.62);
+  --bubble-outgoing-border: rgba(249, 115, 22, 0.45);
+  --app-backdrop:
+    radial-gradient(at 0% 0%, rgba(254, 215, 170, 0.85) 0px, transparent 55%),
+    radial-gradient(at 100% 0%, rgba(254, 240, 138, 0.78) 0px, transparent 55%),
+    radial-gradient(at 0% 100%, rgba(254, 205, 211, 0.8) 0px, transparent 50%),
+    #fff7ed;
 }
 
 * {
@@ -77,13 +145,7 @@ video::-webkit-media-controls-start-playback-button {
 
 /* Ambient gradient backdrop */
 body {
-  background: 
-    radial-gradient(at 0% 0%, rgba(224, 242, 254, 0.85) 0px, transparent 50%),
-    radial-gradient(at 100% 0%, rgba(243, 232, 255, 0.8) 0px, transparent 50%),
-    radial-gradient(at 50% 50%, rgba(254, 243, 199, 0.4) 0px, transparent 50%),
-    radial-gradient(at 0% 100%, rgba(236, 253, 245, 0.8) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(224, 231, 255, 0.85) 0px, transparent 50%),
-    #eef3f9;
+  background: var(--app-backdrop);
   color: var(--text-primary);
   user-select: none;
 }
@@ -91,8 +153,8 @@ body {
 /* Frosted glass utilities */
 .glass-panel {
   background: var(--glass-bg);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur, 20px)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 20px)) saturate(180%);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
 }
@@ -113,22 +175,22 @@ body {
 }
 
 .glass-pill {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--pill-bg, rgba(255, 255, 255, 0.6));
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--pill-border, rgba(255, 255, 255, 0.8));
   border-radius: 9999px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
 }
 
 .glass-input {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--input-bg, rgba(255, 255, 255, 0.85));
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.75);
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.75));
   border-radius: 24px;
-  color: #0f172a !important;
-  -webkit-text-fill-color: #0f172a !important;
+  color: var(--input-text, #0f172a) !important;
+  -webkit-text-fill-color: var(--input-text, #0f172a) !important;
   caret-color: #0284c7 !important;
   font-weight: 600;
   padding: 10px 16px;
@@ -137,9 +199,9 @@ body {
 }
 
 .glass-input:focus {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  -webkit-text-fill-color: #0f172a !important;
+  background: var(--input-focus-bg, #ffffff) !important;
+  color: var(--input-text, #0f172a) !important;
+  -webkit-text-fill-color: var(--input-text, #0f172a) !important;
   border-color: rgba(2, 132, 199, 0.7);
   box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.25);
 }
@@ -224,4 +286,29 @@ body {
 
 .glow-active {
   animation: pulseGlow 2.5s infinite ease-in-out;
+}
+
+/* Chat message bubble transparency (controlled dynamically from Settings -> Chats & Dark Mode) */
+.message-bubble-incoming {
+  background-color: rgba(255, 255, 255, var(--msg-bg-opacity, 0));
+  border: 1px solid rgba(148, 163, 184, var(--msg-border-opacity, 0));
+  box-shadow: var(--msg-shadow, none);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+:root[data-theme="dark"] .message-bubble-incoming {
+  background-color: rgba(30, 41, 59, var(--msg-bg-opacity, 0));
+  border: 1px solid rgba(148, 163, 184, var(--msg-border-opacity, 0));
+}
+
+.message-bubble-outgoing {
+  background-color: rgba(199, 230, 255, var(--msg-bg-opacity, 0));
+  border: 1px solid rgba(56, 189, 248, var(--msg-border-opacity, 0));
+  box-shadow: var(--msg-shadow, none);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+:root[data-theme="dark"] .message-bubble-outgoing {
+  background-color: rgba(3, 105, 161, var(--msg-bg-opacity, 0));
+  border: 1px solid rgba(56, 189, 248, var(--msg-border-opacity, 0));
 }

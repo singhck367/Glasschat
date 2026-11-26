@@ -1,16 +1,30 @@
 import React from 'react';
 import { Phone, Video, PhoneIncoming, PhoneOutgoing, PhoneMissed, Users } from 'lucide-react';
 import { formatChatTimestamp } from '../utils/time';
+import { resolveDisplayName } from '../utils/contacts';
 
 export default function CallsList({ 
-  calls, 
-  contacts, 
+  calls = [], 
+  contacts = [], 
   onStartCall, 
-  searchQuery 
+  searchQuery,
+  savedContactsMap = {}
 }) {
-  const filteredCalls = calls.filter(call => 
-    call.callerName?.toLowerCase().includes((searchQuery || '').toLowerCase())
-  );
+  const resolveCaller = (call) => {
+    if (call.isGroup) return call.callerName || 'Group';
+    const matched = contacts.find(c => c.id === call.callerId);
+    if (matched) return resolveDisplayName(matched, savedContactsMap, false);
+    return resolveDisplayName({
+      name: call.callerName,
+      phone: call.callerPhone || ''
+    }, savedContactsMap, false);
+  };
+
+  const filteredCalls = calls.filter(call => {
+    const dName = resolveCaller(call);
+    const q = (searchQuery || '').toLowerCase();
+    return !q || dName.toLowerCase().includes(q) || (call.callerPhone || '').toLowerCase().includes(q);
+  });
 
   return (
     <div style={{
@@ -37,6 +51,8 @@ export default function CallsList({
         const isVideo = call.type === 'video';
         const isMissed = call.status === 'missed';
         const isIncoming = call.status === 'incoming';
+        const displayCallerName = resolveCaller(call);
+        const matchedContact = contacts.find(c => c.id === call.callerId);
 
         return (
           <div
@@ -53,8 +69,8 @@ export default function CallsList({
             {/* Avatar */}
             <div style={{ position: 'relative' }}>
               <img 
-                src={call.callerAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'} 
-                alt={call.callerName}
+                src={matchedContact?.avatar || call.callerAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'} 
+                alt={displayCallerName}
                 style={{
                   width: '46px',
                   height: '46px',
@@ -81,14 +97,14 @@ export default function CallsList({
             <div style={{ flex: 1, minWidth: 0 }}>
               <h3 style={{
                 fontSize: '15px',
-                fontWeight: '600',
+                fontWeight: '700',
                 color: isMissed ? '#ef4444' : 'var(--text-primary)',
                 marginBottom: '2px',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis'
               }}>
-                {call.callerName}
+                {displayCallerName}
               </h3>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -108,7 +124,13 @@ export default function CallsList({
             {/* Redial Action */}
             <button
               onClick={() => onStartCall(
-                { id: call.callerId, name: call.callerName, avatar: call.callerAvatar, isGroup: call.isGroup }, 
+                {
+                  id: call.callerId,
+                  name: displayCallerName,
+                  phone: matchedContact?.phone || call.callerPhone || '',
+                  avatar: matchedContact?.avatar || call.callerAvatar,
+                  isGroup: call.isGroup
+                }, 
                 isVideo
               )}
               className="glass-btn"
@@ -123,4 +145,3 @@ export default function CallsList({
     </div>
   );
 }
-

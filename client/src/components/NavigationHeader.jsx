@@ -1,5 +1,5 @@
 import React from 'react';
-import { Search, UserPlus, Sparkles, MessageSquarePlus, Download } from 'lucide-react';
+import { Search, UserPlus, MessageSquarePlus, ShieldAlert } from 'lucide-react';
 
 export default function NavigationHeader({ 
   currentUser, 
@@ -9,13 +9,9 @@ export default function NavigationHeader({
   onOpenNewChat,
   onOpenAdmin,
   onOpenSettings,
-  onOpenInstall,
+  onOpenSos,
   activeTab 
 }) {
-  const showInstallPill = typeof window !== 'undefined' && 
-    onOpenInstall &&
-    !window.Capacitor?.isNativePlatform?.() &&
-    !(window.navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)')?.matches);
   return (
     <header className="glass-panel" style={{
       padding: '12px 16px',
@@ -23,8 +19,8 @@ export default function NavigationHeader({
       display: 'flex',
       flexDirection: 'column',
       gap: '10px',
-      borderBottom: '1px solid rgba(255, 255, 255, 0.65)',
-      backgroundColor: 'rgba(255, 255, 255, 0.9)',
+      borderBottom: '1px solid var(--glass-border)',
+      backgroundColor: 'var(--glass-bg-header)',
       position: 'relative',
       zIndex: 20
     }}>
@@ -86,27 +82,20 @@ export default function NavigationHeader({
 
         {/* Action buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          {showInstallPill && (
+          {/* Emergency SOS Quick Button */}
+          {onOpenSos && (
             <button
-              onClick={onOpenInstall}
+              onClick={onOpenSos}
               className="glass-btn"
               style={{
-                height: '32px',
-                padding: '0 10px',
-                borderRadius: '12px',
-                backgroundColor: 'rgba(16, 185, 129, 0.14)',
-                borderColor: '#10b981',
-                color: '#059669',
-                fontSize: '11px',
-                fontWeight: '800',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px'
+                width: '36px',
+                height: '36px',
+                backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                borderColor: 'rgba(239, 68, 68, 0.45)'
               }}
-              title="Install GlassChat App"
+              title="Emergency SOS Alert"
             >
-              <Download size={13} />
-              <span>Install</span>
+              <ShieldAlert size={16} color="#ef4444" />
             </button>
           )}
           {/* New Chat / Contacts Directory */}
