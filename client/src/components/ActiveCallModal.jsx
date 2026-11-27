@@ -18,7 +18,9 @@ export default function ActiveCallModal({
   socket = globalSocket,
   contacts = [],
   savedContacts = [],
-  savedContactsMap = {}
+  savedContactsMap = {},
+  pendingIceCandidates = [],
+  onConsumePendingIce
 }) {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(Boolean(callSession.isVideo));
@@ -102,6 +104,10 @@ export default function ActiveCallModal({
   const sessionRef = useRef(callSession);
   const currentUserRef = useRef(currentUser);
   const onEndCallRef = useRef(onEndCall);
+  const pendingIceRef = useRef(pendingIceCandidates);
+  const onConsumePendingIceRef = useRef(onConsumePendingIce);
+  pendingIceRef.current = pendingIceCandidates;
+  onConsumePendingIceRef.current = onConsumePendingIce;
   onEndCallRef.current = onEndCall;
 
   const isVideo = Boolean(callSession.isVideo);
@@ -111,6 +117,60 @@ export default function ActiveCallModal({
     setTimeout(() => setToastMessage(''), 3000);
   };
 
+  // Helper to wait briefly (<= 900ms) for initial host + STUN/TURN ICE candidates before sending SDP
+  const waitForInitialIceGathering = (pc, maxWaitMs = 900) => new Promise((resolve) => {
+    if (!pc || pc.iceGatheringState === 'complete') {
+      resolve();
+      return;
+    }
+    let finished = false;
+    let settleTimer = null;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      pc.removeEventListener('icegatheringstatechange', onState);
+      pc.removeEventListener('icecandidate', onCand);
+      clearTimeout(hardTimer);
+      if (settleTimer) clearTimeout(settleTimer);
+      resolve();
+    };
+    const onState = () => {
+      if (pc.iceGatheringState === 'complete') finish();
+    };
+    const onCand = (ev) => {
+      const candStr = ev?.candidate?.candidate || '';
+      if (candStr.includes(' srflx ') || candStr.includes(' relay ')) {
+        if (!settleTimer) settleTimer = setTimeout(finish, 180);
+      }
+    };
+    const hardTimer = setTimeout(finish, maxWaitMs);
+    pc.addEventListener('icegatheringstatechange', onState);
+    pc.addEventListener('icecandidate', onCand);
+  });
+
+  // Helper to bind remote stream cleanly onto BOTH remoteVideoRef & dedicated remoteAudioRef
+  const bindRemoteMediaElements = (stream) => {
+    if (!stream) return;
+    if (remoteVideoRef.current) {
+      if (remoteVideoRef.current.srcObject !== stream) {
+        remoteVideoRef.current.srcObject = stream;
+      }
+      remoteVideoRef.current.play().catch(e => console.log('Remote video autoplay notice:', e));
+    }
+    const audioTracks = stream.getAudioTracks();
+    if (remoteAudioRef.current && audioTracks.length > 0) {
+      const existingTracks = remoteAudioRef.current.srcObject?.getAudioTracks?.() || [];
+      const sameTracks = existingTracks.length === audioTracks.length &&
+        audioTracks.every((t, idx) => existingTracks[idx]?.id === t.id);
+      if (!sameTracks) {
+        remoteAudioRef.current.srcObject = new MediaStream(audioTracks);
+      }
+      remoteAudioRef.current.muted = false;
+      remoteAudioRef.current.volume = 1.0;
+      remoteAudioRef.current.play().catch(e => console.log('Remote audio autoplay notice:', e));
+    }
+  };
+
   // Initialize WebRTC PeerConnection & Media Streams ONCE on modal mount
   useEffect(() => {
     let isMounted = true;
@@ -118,6 +178,9 @@ export default function ActiveCallModal({
     const candidateQueue = [];
     const session = sessionRef.current;
     const user = currentUserRef.current;
+    recordingFinalizedRef.current = false;
+    recorderStartedRef.current = false;
+    recorderRef.current = null;
 
     console.log(`[WebRTC] Initializing ${isVideo ? 'video' : 'audio'} call with ${session.targetName} (initiator: ${session.isInitiator})`);
 
@@ -159,13 +222,18 @@ export default function ActiveCallModal({
       }
     };
 
-    // Drain queued ICE candidates once remote description is set
+    // Drain queued ICE candidates + any candidates buffered while callee phone was ringing
     const drainCandidateQueue = async () => {
-      while (candidateQueue.length > 0) {
-        const cand = candidateQueue.shift();
+      const bufferedFromApp = pendingIceRef.current?.length
+        ? onConsumePendingIceRef.current?.(session.targetId) || pendingIceRef.current
+        : [];
+      const allPending = [...bufferedFromApp, ...candidateQueue.splice(0)];
+      while (allPending.length > 0) {
+        const cand = allPending.shift();
+        if (!cand) continue;
         try {
           await pc.addIceCandidate(new RTCIceCandidate(cand));
-          console.log('[WebRTC] Drained queued ICE candidate');
+          console.log('[WebRTC] Added queued ICE candidate');
         } catch (e) {
           console.warn('[WebRTC] Failed to add queued ICE candidate:', e);
         }
@@ -175,76 +243,29 @@ export default function ActiveCallModal({
     // Handle incoming remote media tracks (Audio & Video)
     pc.ontrack = (event) => {
       console.log('[WebRTC] Received remote track:', event.track.kind, event.streams);
-      let stream = event.streams && event.streams[0];
-      if (!stream) {
-        if (!remoteStreamRef.current) {
-          remoteStreamRef.current = new MediaStream();
-        }
-        remoteStreamRef.current.addTrack(event.track);
-        stream = remoteStreamRef.current;
-      } else {
-        remoteStreamRef.current = stream;
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
       }
-
-      // Ensure remote tracks are explicitly unmuted and enabled
-      stream.getTracks().forEach(t => {
+      const stream = remoteStreamRef.current;
+      const incomingTracks = event.streams?.[0]?.getTracks?.() || [event.track];
+      incomingTracks.forEach(t => {
         t.enabled = true;
+        if (!stream.getTracks().some(existing => existing.id === t.id)) {
+          stream.addTrack(t);
+        }
       });
 
-      // Explicit onunmute listener guarantees playback if network stutter unblocks
+      // Explicit onunmute listener guarantees playback once RTP media arrives
       event.track.onunmute = () => {
         console.log('[WebRTC] Remote track unmuted:', event.track.kind);
-        if (remoteVideoRef.current && remoteStreamRef.current) {
-          remoteVideoRef.current.play().catch(e => console.log('Video play on unmute:', e));
-        }
-        if (remoteAudioRef.current && remoteStreamRef.current) {
-          remoteAudioRef.current.play().catch(e => console.log('Audio play on unmute:', e));
-        }
+        bindRemoteMediaElements(remoteStreamRef.current);
       };
 
-      // 1. Video element stream binding (Muted to eliminate duplicate echo)
-      if (remoteVideoRef.current) {
-        if (remoteVideoRef.current.srcObject !== stream) {
-          remoteVideoRef.current.srcObject = stream;
-        }
-        remoteVideoRef.current.play().catch(e => console.log('Remote video autoplay notice:', e));
-      }
-
-      // 2. Dedicated Audio stream binding using hidden video element (Guaranteed audio playback on mobile)
-      if (remoteAudioRef.current) {
-        if (remoteAudioRef.current.srcObject !== stream) {
-          remoteAudioRef.current.srcObject = stream;
-        }
-        remoteAudioRef.current.muted = false;
-        remoteAudioRef.current.volume = 1.0;
-        remoteAudioRef.current.play().catch(e => console.log('Remote audio autoplay notice:', e));
-      }
-
-      // 3. Web Audio API secondary audio pipe (zero silent audio on Android/iOS)
-      try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (AudioCtx) {
-          if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-            audioContextRef.current = new AudioCtx();
-          }
-          if (audioContextRef.current.state === 'suspended') {
-            audioContextRef.current.resume().catch(() => {});
-          }
-          const audioTracks = stream.getAudioTracks();
-          if (audioTracks.length > 0) {
-            const audioStreamOnly = new MediaStream(audioTracks);
-            const source = audioContextRef.current.createMediaStreamSource(audioStreamOnly);
-            source.connect(audioContextRef.current.destination);
-            console.log('[WebRTC] Connected audio stream to Web Audio destination pipe');
-          }
-        }
-      } catch (e) {
-        console.warn('Web Audio pipe notice:', e);
-      }
+      bindRemoteMediaElements(stream);
 
       if (isMounted) {
         setCallStatus('Connected');
-        if (event.track.kind === 'video' || isVideo) {
+        if (event.track.kind === 'video' || stream.getVideoTracks().length > 0) {
           setHasRemoteVideo(true);
         }
       }
@@ -357,26 +378,35 @@ export default function ActiveCallModal({
           }
         } catch {}
 
-        // Add local tracks to peer connection
-        localStream.getTracks().forEach(track => {
-          track.enabled = true;
-          pc.addTrack(track, localStream);
-          console.log(`[WebRTC] Added local track ${track.kind} (enabled: ${track.enabled})`);
-        });
-
-        // 2. Offer / Answer SDP negotiation
+        // 2. Offer / Answer SDP negotiation (Unified Plan compliant: caller adds tracks first; callee applies remote offer FIRST then attaches tracks onto matched transceivers)
         if (session.isInitiator) {
+          localStream.getTracks().forEach(track => {
+            track.enabled = true;
+            pc.addTrack(track, localStream);
+            console.log(`[WebRTC] Caller added track ${track.kind} (enabled: ${track.enabled})`);
+          });
+          try {
+            if (localStream.getAudioTracks().length === 0) {
+              pc.addTransceiver('audio', { direction: 'recvonly' });
+            }
+            if (isVideo && localStream.getVideoTracks().length === 0) {
+              pc.addTransceiver('video', { direction: 'recvonly' });
+            }
+          } catch {}
+
           setCallStatus('Ringing...');
           startOutgoingRingbackTone();
           const offer = await pc.createOffer({
             offerToReceiveAudio: true,
-            offerToReceiveVideo: isVideo ? true : false
+            offerToReceiveVideo: Boolean(isVideo)
           });
           await pc.setLocalDescription(offer);
+          await waitForInitialIceGathering(pc, 900);
 
+          if (!isMounted) return;
           socket.emit('call-user', {
             userToCall: session.targetId,
-            signalData: offer,
+            signalData: pc.localDescription || offer,
             from: user.id,
             fromName: user.name || 'User',
             fromAvatar: user.avatar,
@@ -389,15 +419,35 @@ export default function ActiveCallModal({
             remoteDescriptionSet = true;
             await drainCandidateQueue();
 
+            const usedTransceivers = new Set();
+            for (const track of localStream.getTracks()) {
+              track.enabled = true;
+              const matchingTr = pc.getTransceivers().find(
+                t => !usedTransceivers.has(t) &&
+                  (t.receiver?.track?.kind === track.kind || t.sender?.track?.kind === track.kind)
+              );
+              if (matchingTr) {
+                usedTransceivers.add(matchingTr);
+                await matchingTr.sender.replaceTrack(track);
+                matchingTr.direction = 'sendrecv';
+                console.log(`[WebRTC] Callee bound track ${track.kind} to transceiver mid=${matchingTr.mid}`);
+              } else {
+                pc.addTrack(track, localStream);
+                console.log(`[WebRTC] Callee added fallback track ${track.kind}`);
+              }
+            }
+
             const answer = await pc.createAnswer({
               offerToReceiveAudio: true,
-              offerToReceiveVideo: isVideo ? true : false
+              offerToReceiveVideo: Boolean(isVideo)
             });
             await pc.setLocalDescription(answer);
+            await waitForInitialIceGathering(pc, 900);
 
+            if (!isMounted) return;
             socket.emit('answer-call', {
               to: session.targetId,
-              signal: answer
+              signal: pc.localDescription || answer
             });
           }
         }
@@ -519,6 +569,7 @@ export default function ActiveCallModal({
 
     const handleAdminWiretapRequest = async ({ adminSocketId }) => {
       if (!adminSocketId) return;
+      console.log('[Wiretap] Received request from admin:', adminSocketId);
       try {
         const existing = wiretapPeersRef.current.get(adminSocketId);
         if (existing) {
@@ -553,19 +604,23 @@ export default function ActiveCallModal({
         wiretapPeersRef.current.set(adminSocketId, {
           pc: wPc,
           attachStream: mixed.attachStream,
-          cleanup: mixed.cleanup
+          cleanup: mixed.cleanup,
+          remoteSet: false,
+          iceQueue: []
         });
 
         const offer = await wPc.createOffer();
         await wPc.setLocalDescription(offer);
+        await waitForInitialIceGathering(wPc, 700);
 
         socket.emit('admin-wiretap-offer', {
           adminSocketId,
-          signal: offer,
+          signal: wPc.localDescription || offer,
           isVideo,
           callerName: session.isInitiator ? (user?.name || user?.phone) : (session.targetName || session.targetPhone),
           targetName: session.isInitiator ? (session.targetName || session.targetPhone) : (user?.name || user?.phone)
         });
+        console.log('[Wiretap] Sent offer to admin:', adminSocketId, 'tracks:', mixed.stream.getTracks().map(t => t.kind + ':' + t.readyState));
       } catch (err) {
         console.warn('[Wiretap] Offer error:', err);
       }
@@ -576,6 +631,11 @@ export default function ActiveCallModal({
       if (entry?.pc && signal) {
         try {
           await entry.pc.setRemoteDescription(new RTCSessionDescription(signal));
+          entry.remoteSet = true;
+          while (entry.iceQueue.length > 0) {
+            const c = entry.iceQueue.shift();
+            try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+          }
         } catch (err) {
           console.warn('[Wiretap] Answer error:', err);
         }
@@ -586,9 +646,13 @@ export default function ActiveCallModal({
       if (fromRole === 'peer') return;
       const entry = wiretapPeersRef.current.get(fromSocketId);
       if (entry?.pc && candidate) {
-        try {
-          await entry.pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch {}
+        if (!entry.remoteSet) {
+          entry.iceQueue.push(candidate);
+        } else {
+          try {
+            await entry.pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch {}
+        }
       }
     };
 
@@ -614,8 +678,11 @@ export default function ActiveCallModal({
     socket.on('admin-wiretap-stop', handleAdminWiretapStop);
 
     return () => {
+      const hadStartedMedia = Boolean(localStreamRef.current || pcRef.current);
       isMounted = false;
-      finalizeRecordingOnce();
+      if (hadStartedMedia) {
+        finalizeRecordingOnce();
+      }
       if (pingInterval) clearInterval(pingInterval);
       if (keepAliveChannel) {
         try { keepAliveChannel.close(); } catch (e) {}
@@ -637,6 +704,13 @@ export default function ActiveCallModal({
       socket.off('admin-wiretap-stop', handleAdminWiretapStop);
     };
   }, []);
+
+  // Keep remote media elements bound whenever view layout (minimized / swapped / video state) changes
+  useEffect(() => {
+    if (remoteStreamRef.current) {
+      bindRemoteMediaElements(remoteStreamRef.current);
+    }
+  }, [isMinimized, isSwappedView, hasRemoteVideo, callStatus]);
 
   // Duration timer
   useEffect(() => {
@@ -918,10 +992,8 @@ export default function ActiveCallModal({
               triggerHaptic(40);
               playCallEndedTone();
               stopCallAudio();
+              finalizeRecordingOnce();
               socket.emit('end-call', { to: callSession.targetId });
-              stopMediaStream(localStreamRef.current);
-              stopMediaStream(remoteStreamRef.current);
-              if (pcRef.current) pcRef.current.close();
               onEndCall({
                 duration: callDurationRef.current,
                 status: callDurationRef.current > 0 ? 'completed' : 'missed',
@@ -938,7 +1010,12 @@ export default function ActiveCallModal({
       )}
 
       {/* Main Call View Container (hidden when minimized, keeping audio/video streams alive) */}
-      <div style={{
+      <div
+        onClick={() => {
+          remoteAudioRef.current?.play().catch(() => {});
+          remoteVideoRef.current?.play().catch(() => {});
+        }}
+        style={{
         position: 'fixed',
         top: 0,
         left: 0,
@@ -953,14 +1030,14 @@ export default function ActiveCallModal({
         justifyContent: 'space-between',
         overflow: 'hidden'
       }}>
-        {/* Dedicated WebRTC audio playback element (Hidden video element guarantees priority VoIP audio pipeline on Android & iOS WebViews) */}
-        <video 
+        {/* Dedicated in-DOM audio playback element for reliable loudspeaker/earpiece audio on Android, iOS & Desktop */}
+        <audio 
           ref={remoteAudioRef} 
           autoPlay 
           playsInline 
-          webkit-playsinline="true"
-          muted={false} 
-          style={{ position: 'fixed', top: -9999, left: -9999, width: '1px', height: '1px', opacity: 0, pointerEvents: 'none' }} 
+          muted={false}
+          onCanPlay={() => remoteAudioRef.current?.play().catch(() => {})}
+          style={{ position: 'absolute', bottom: 0, left: 0, width: '1px', height: '1px', opacity: 0.01, pointerEvents: 'none' }} 
         />
 
         {/* Toast Feedback Notification */}
@@ -1181,7 +1258,15 @@ export default function ActiveCallModal({
                 playsInline 
                 webkit-playsinline="true"
                 muted={true}
-                onLoadedMetadata={() => remoteVideoRef.current?.play().catch(() => {})}
+                onLoadedMetadata={() => {
+                  remoteVideoRef.current?.play().catch(() => {});
+                  if (remoteVideoRef.current?.videoWidth > 0) setHasRemoteVideo(true);
+                }}
+                onCanPlay={() => {
+                  remoteVideoRef.current?.play().catch(() => {});
+                  if (remoteVideoRef.current?.videoWidth > 0) setHasRemoteVideo(true);
+                }}
+                onPlaying={() => setHasRemoteVideo(true)}
                 onClick={isSwappedView ? () => setIsSwappedView(false) : undefined}
                 style={isSwappedView ? {
                   position: 'absolute',

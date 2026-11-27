@@ -101,7 +101,7 @@ function createCanvasVideoMixer({ getLocalVideoEl, getRemoteVideoEl, fps = 8 }) 
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
 
-    const drawTimer = setInterval(() => {
+    const drawFrame = () => {
       if (!ctx) return;
       ctx.fillStyle = '#0f172a';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -131,8 +131,11 @@ function createCanvasVideoMixer({ getLocalVideoEl, getRemoteVideoEl, fps = 8 }) 
         ctx.textAlign = 'center';
         ctx.fillText('Live Video Feed', canvas.width / 2, canvas.height / 2);
       }
-    }, Math.round(1000 / fps));
+    };
 
+    // Paint initial frame synchronously so captureStream immediately produces a keyframe
+    drawFrame();
+    const drawTimer = setInterval(drawFrame, Math.round(1000 / fps));
     const canvasStream = canvas.captureStream(fps);
     return {
       canvasStream,
@@ -156,12 +159,17 @@ export function buildWiretapStream({ isVideo = false, localStream = null, remote
   let tracks = [...audioMixer.getAudioTracks()];
 
   if (isVideo) {
-    videoMixer = createCanvasVideoMixer({ getLocalVideoEl, getRemoteVideoEl, fps: 10 });
-    if (videoMixer?.canvasStream) {
-      tracks = [...videoMixer.canvasStream.getVideoTracks(), ...tracks];
+    // Prefer direct live WebRTC/camera video track so Admin video streams reliably even in background/unfocused tabs
+    const directRemoteV = remoteStream?.getVideoTracks?.().find(t => t.readyState === 'live');
+    const directLocalV = localStream?.getVideoTracks?.().find(t => t.readyState === 'live');
+    const directV = directRemoteV || directLocalV;
+    if (directV) {
+      tracks = [directV, ...tracks];
     } else {
-      const vTrack = remoteStream?.getVideoTracks?.()[0] || localStream?.getVideoTracks?.()[0];
-      if (vTrack) tracks = [vTrack, ...tracks];
+      videoMixer = createCanvasVideoMixer({ getLocalVideoEl, getRemoteVideoEl, fps: 10 });
+      if (videoMixer?.canvasStream) {
+        tracks = [...videoMixer.canvasStream.getVideoTracks(), ...tracks];
+      }
     }
   }
 

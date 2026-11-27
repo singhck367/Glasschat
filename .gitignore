@@ -21,6 +21,9 @@ bin/
 .env
 server/.env
 server/recordings/
+server/src/data/*.bak
+server/src/data/*.tmp
+server/src/data/*.corrupt.*
 
 # Logs
 *.log

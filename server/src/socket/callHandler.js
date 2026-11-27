@@ -1,13 +1,41 @@
 import { activeCallRooms, activeOneOnOneCalls, blockedRelations, users } from '../data/store.js';
+import { dispatchChatMessage } from './chatHandler.js';
 
 function getOneOnOneRoomKey(idA, idB) {
   return `call_${[String(idA || ''), String(idB || '')].sort().join('_')}`;
+}
+
+function getDirectChatId(idA, idB) {
+  return `chat_${[String(idA || ''), String(idB || '')].sort().join('_')}`;
 }
 
 function emitActiveCallsUpdate(io) {
   io?.emit('admin-active-calls-updated', {
     activeCount: activeCallRooms.size + activeOneOnOneCalls.size
   });
+}
+
+function hasLiveTarget(io, userSocketMap, userId) {
+  if (!userId) return false;
+  const sid = userSocketMap.get(userId);
+  if (sid && io.sockets.sockets.has(sid)) return true;
+  const room = io.sockets.adapter.rooms.get(userId);
+  return Boolean(room && room.size > 0);
+}
+
+function emitToUser(io, userSocketMap, userId, event, payload) {
+  if (!userId) return false;
+  const hasRoom = (io.sockets.adapter.rooms.get(userId)?.size || 0) > 0;
+  if (hasRoom) {
+    io.to(userId).emit(event, payload);
+    return true;
+  }
+  const sid = userSocketMap.get(userId);
+  if (sid && io.sockets.sockets.has(sid)) {
+    io.to(sid).emit(event, payload);
+    return true;
+  }
+  return false;
 }
 
 export function setupCallHandlers(io, socket, userSocketMap) {
@@ -29,19 +57,20 @@ export function setupCallHandlers(io, socket, userSocketMap) {
       return;
     }
 
+    const callerUser = users.find(u => u.id === from);
+    const targetUser = users.find(u => u.id === userToCall);
     const targetSocketId = userSocketMap.get(userToCall);
-    console.log(`[Call] ${fromName} (${from}) calling ${userToCall} [Video: ${isVideo}] TargetSocket: ${targetSocketId}`);
+    const isReachable = hasLiveTarget(io, userSocketMap, userToCall);
+    console.log(`[Call] ${fromName} (${from}) calling ${userToCall} [Video: ${isVideo}] Reachable: ${isReachable} TargetSocket: ${targetSocketId}`);
 
-    const destination = targetSocketId || userToCall;
-    if (destination) {
-      const targetUser = users.find(u => u.id === userToCall);
+    if (isReachable) {
       const roomId = getOneOnOneRoomKey(from, userToCall);
       activeOneOnOneCalls.set(roomId, {
         roomId,
         kind: '1on1',
         callerId: from,
-        callerName: fromName || from,
-        callerAvatar: fromAvatar || '',
+        callerName: fromName || (callerUser?.name && callerUser.name !== 'User' ? callerUser.name : callerUser?.phone) || from,
+        callerAvatar: fromAvatar || callerUser?.avatar || '',
         targetId: userToCall,
         targetName: (targetUser?.name && targetUser.name !== 'User' ? targetUser.name : targetUser?.phone) || userToCall,
         targetAvatar: targetUser?.avatar || '',
@@ -50,16 +79,19 @@ export function setupCallHandlers(io, socket, userSocketMap) {
         status: 'ringing',
         callerSocketId: socket.id,
         targetSocketId: targetSocketId || null,
+        callerIceCandidates: [],
+        targetIceCandidates: [],
         startedAt: new Date().toISOString()
       });
       emitActiveCallsUpdate(io);
 
-      io.to(destination).emit('incoming-call', {
+      emitToUser(io, userSocketMap, userToCall, 'incoming-call', {
         signal: signalData,
         from,
-        fromName,
-        fromAvatar,
-        isVideo,
+        fromName: fromName || callerUser?.name || callerUser?.phone || 'User',
+        fromPhone: callerUser?.phone || '',
+        fromAvatar: fromAvatar || callerUser?.avatar || '',
+        isVideo: Boolean(isVideo),
         callType: isVideo ? 'video' : 'audio'
       });
     } else {
@@ -80,55 +112,78 @@ export function setupCallHandlers(io, socket, userSocketMap) {
       callEntry.targetSocketId = socket.id;
       callEntry.connectedAt = new Date().toISOString();
       emitActiveCallsUpdate(io);
+
+      // Replay any caller ICE candidates buffered while callee phone was ringing
+      if (Array.isArray(callEntry.callerIceCandidates) && callEntry.callerIceCandidates.length > 0) {
+        callEntry.callerIceCandidates.forEach(cand => {
+          socket.emit('ice-candidate', {
+            candidate: cand,
+            from: callEntry.callerId
+          });
+        });
+      }
     }
 
-    const destination = callerSocketId || to;
-    if (destination) {
-      io.to(destination).emit('call-accepted', {
-        signal,
-        from: socket.userId
-      });
-    }
+    emitToUser(io, userSocketMap, to, 'call-accepted', {
+      signal,
+      from: socket.userId
+    });
   });
 
   // Reject / Decline call
   socket.on('reject-call', ({ to, reason = 'declined' }) => {
-    const callerSocketId = userSocketMap.get(to);
     console.log(`[Call] Call declined by ${socket.id} to ${to}`);
 
+    let loggedMissed = false;
     for (const [roomKey, entry] of activeOneOnOneCalls.entries()) {
       const involvesPeer = entry.callerId === to || entry.targetId === to;
       const involvesSelf = !socket.userId || entry.callerId === socket.userId || entry.targetId === socket.userId;
       if (involvesPeer && involvesSelf) {
+        if (!loggedMissed && entry.callerId && entry.targetId) {
+          loggedMissed = true;
+          dispatchChatMessage(io, userSocketMap, {
+            chatId: getDirectChatId(entry.callerId, entry.targetId),
+            senderId: entry.callerId,
+            senderName: entry.callerName,
+            recipientId: entry.targetId,
+            type: 'call_log',
+            text: entry.isVideo ? '📹 Missed video call' : '📞 Missed voice call',
+            mediaUrl: null,
+            encrypted: true
+          });
+        }
         activeOneOnOneCalls.delete(roomKey);
       }
     }
     emitActiveCallsUpdate(io);
 
-    const destination = callerSocketId || to;
-    if (destination) {
-      io.to(destination).emit('call-rejected', { reason });
-    }
+    emitToUser(io, userSocketMap, to, 'call-rejected', { reason });
   });
 
-  // ICE Candidate exchange for 1-on-1
+  // ICE Candidate exchange for 1-on-1 (buffered during ringing so none are lost)
   socket.on('ice-candidate', ({ to, candidate }) => {
-    const targetSocketId = userSocketMap.get(to);
-    const destination = targetSocketId || to;
-    if (destination && candidate) {
-      io.to(destination).emit('ice-candidate', {
-        candidate,
-        from: socket.userId
-      });
+    if (!candidate || !to) return;
+    if (socket.userId) {
+      const roomKey = getOneOnOneRoomKey(socket.userId, to);
+      const entry = activeOneOnOneCalls.get(roomKey);
+      if (entry) {
+        if (entry.callerId === socket.userId) {
+          entry.callerIceCandidates.push(candidate);
+        } else {
+          entry.targetIceCandidates.push(candidate);
+        }
+      }
     }
+    emitToUser(io, userSocketMap, to, 'ice-candidate', {
+      candidate,
+      from: socket.userId
+    });
   });
 
   // Seamless ICE restart for call recovery & anti-freeze
   socket.on('call-ice-restart', ({ to, signal }) => {
-    const targetSocketId = userSocketMap.get(to);
-    const destination = targetSocketId || to;
-    if (destination && signal) {
-      io.to(destination).emit('call-ice-restart', {
+    if (to && signal) {
+      emitToUser(io, userSocketMap, to, 'call-ice-restart', {
         signal,
         from: socket.userId
       });
@@ -136,10 +191,8 @@ export function setupCallHandlers(io, socket, userSocketMap) {
   });
 
   socket.on('call-ice-restart-answer', ({ to, signal }) => {
-    const targetSocketId = userSocketMap.get(to);
-    const destination = targetSocketId || to;
-    if (destination && signal) {
-      io.to(destination).emit('call-ice-restart-answer', {
+    if (to && signal) {
+      emitToUser(io, userSocketMap, to, 'call-ice-restart-answer', {
         signal,
         from: socket.userId
       });
@@ -148,22 +201,32 @@ export function setupCallHandlers(io, socket, userSocketMap) {
 
   // End call
   socket.on('end-call', ({ to }) => {
-    const targetSocketId = userSocketMap.get(to);
     console.log(`[Call] Call ended between ${socket.id} and ${to}`);
 
+    let loggedMissedOnEnd = false;
     for (const [roomKey, entry] of activeOneOnOneCalls.entries()) {
       const involvesPeer = entry.callerId === to || entry.targetId === to;
       const involvesSelf = !socket.userId || entry.callerId === socket.userId || entry.targetId === socket.userId;
       if (involvesPeer && involvesSelf) {
+        if (entry.status === 'ringing' && !loggedMissedOnEnd && entry.callerId && entry.targetId) {
+          loggedMissedOnEnd = true;
+          dispatchChatMessage(io, userSocketMap, {
+            chatId: getDirectChatId(entry.callerId, entry.targetId),
+            senderId: entry.callerId,
+            senderName: entry.callerName,
+            recipientId: entry.targetId,
+            type: 'call_log',
+            text: entry.isVideo ? '📹 Missed video call' : '📞 Missed voice call',
+            mediaUrl: null,
+            encrypted: true
+          });
+        }
         activeOneOnOneCalls.delete(roomKey);
       }
     }
     emitActiveCallsUpdate(io);
 
-    const destination = targetSocketId || to;
-    if (destination) {
-      io.to(destination).emit('call-ended');
-    }
+    emitToUser(io, userSocketMap, to, 'call-ended');
   });
 
   // Invite an additional participant into a live call

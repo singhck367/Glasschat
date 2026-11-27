@@ -55,8 +55,8 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST']
   },
-  pingInterval: 10000,
-  pingTimeout: 5000,
+  pingInterval: 25000,
+  pingTimeout: 20000,
   maxHttpBufferSize: 1e7 // 10MB max socket payload (prevents memory-exhaustion DoS attacks)
 });
 
@@ -128,7 +128,7 @@ app.get('/ios-manifest.plist', (req, res) => {
                 <key>bundle-identifier</key>
                 <string>com.glasschat.app</string>
                 <key>bundle-version</key>
-                <string>1.3.3</string>
+                <string>1.3.4</string>
                 <key>kind</key>
                 <string>software</string>
                 <key>title</key>
@@ -378,23 +378,7 @@ setInterval(() => {
     }
   }
 
-  // 2. Expire disappearing messages
-  for (const [cId, msgList] of Object.entries(messages)) {
-    if (!Array.isArray(msgList) || msgList.length === 0) continue;
-    const expiredIds = [];
-    const remaining = msgList.filter(m => {
-      if (m.expiresAt && m.expiresAt <= nowMs) {
-        expiredIds.push(m.id);
-        return false;
-      }
-      return true;
-    });
-    if (expiredIds.length > 0) {
-      messages[cId] = remaining;
-      modified = true;
-      io.to(cId).emit('messages-expired', { chatId: cId, expiredIds });
-    }
-  }
+  // 2. Permanent history preservation: messages are NEVER auto-removed unless deleted manually
 
   // 3. Clean 24-hour expired statuses
   const STATUS_TTL_MS = 24 * 60 * 60 * 1000;

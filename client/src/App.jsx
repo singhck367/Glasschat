@@ -28,8 +28,8 @@ import { formatISTTime } from './utils/time';
 import { resolveDisplayName, isSavedNumber } from './utils/contacts';
 import { flushOfflineQueue } from './utils/offlineQueue';
 
-export const APP_VERSION = '1.3.3';
-export const APP_VERSION_CODE = 133;
+export const APP_VERSION = '1.3.4';
+export const APP_VERSION_CODE = 134;
 
 // Compares semver 'x.y.z' to ensure popup ONLY triggers when remote > local
 function isVersionGreater(remoteVer, currentVer) {
@@ -118,9 +118,19 @@ export default function App() {
   const isAdminOpenRef = useRef(isAdminOpen);
   const updateInfoRef = useRef(updateInfo);
   const active1on1CallRef = useRef(active1on1Call);
+  const incomingCallRef = useRef(incomingCall);
   const activeGroupCallRef = useRef(activeGroupCall);
+  const groupsRef = useRef(groups);
+  const pendingCallIceRef = useRef({}); // peerId -> candidate[] buffered while ringing before ActiveCallModal mounts
   const lastBackPressTimeRef = useRef(0);
   const [exitToast, setExitToast] = useState(false);
+
+  const consumePendingIceCandidates = (peerId) => {
+    if (!peerId || !pendingCallIceRef.current[peerId]) return [];
+    const list = [...pendingCallIceRef.current[peerId]];
+    delete pendingCallIceRef.current[peerId];
+    return list;
+  };
 
   useEffect(() => {
     selectedChatRef.current = selectedChat;
@@ -135,7 +145,9 @@ export default function App() {
   useEffect(() => { isAdminOpenRef.current = isAdminOpen; }, [isAdminOpen]);
   useEffect(() => { updateInfoRef.current = updateInfo; }, [updateInfo]);
   useEffect(() => { active1on1CallRef.current = active1on1Call; }, [active1on1Call]);
+  useEffect(() => { incomingCallRef.current = incomingCall; }, [incomingCall]);
   useEffect(() => { activeGroupCallRef.current = activeGroupCall; }, [activeGroupCall]);
+  useEffect(() => { groupsRef.current = groups; }, [groups]);
 
   // Core Mobile Hardware & Gesture Back Button Handler
   const handleBackAction = () => {
@@ -294,10 +306,20 @@ export default function App() {
   }, [savedContactsMap]);
 
   const loadUserData = (userId) => {
-    // Contacts
+    // Contacts (merge so newly ringing callers or senders aren't dropped before server DB settles)
     fetch(`/api/users?userId=${userId}`)
       .then(res => res.json())
-      .then(data => setContacts(data || []))
+      .then(data => {
+        const fetched = Array.isArray(data) ? data : [];
+        setContacts(prev => {
+          const map = new Map();
+          prev.forEach(c => { if (c?.id) map.set(c.id, c); });
+          fetched.forEach(c => {
+            if (c?.id) map.set(c.id, { ...(map.get(c.id) || {}), ...c });
+          });
+          return Array.from(map.values());
+        });
+      })
       .catch(err => console.error('Failed to load contacts:', err));
 
     // Saved Contacts from server
@@ -323,10 +345,21 @@ export default function App() {
       .then(data => setCalls(data || []))
       .catch(err => console.error('Failed to load calls:', err));
 
-    // Chat summaries for real-time last message
+    // Chat summaries (merge keeping newer rawTime entries for instant real-time call/message visibility)
     fetch('/api/chats-summary')
       .then(res => res.json())
-      .then(data => setChatSummaries(data || {}))
+      .then(data => {
+        const incoming = data || {};
+        setChatSummaries(prev => {
+          const merged = { ...incoming };
+          Object.entries(prev).forEach(([k, val]) => {
+            if (!merged[k] || ((val?.rawTime || 0) > (merged[k]?.rawTime || 0))) {
+              merged[k] = val;
+            }
+          });
+          return merged;
+        });
+      })
       .catch(err => console.error('Failed to load chat summaries:', err));
   };
 
@@ -406,23 +439,57 @@ export default function App() {
 
   // Socket Calling & Real-Time Contact Directory Listeners
   useEffect(() => {
-    // Incoming 1-on-1 Call
+    // Incoming 1-on-1 Call: add caller to contacts AND All chats list right away + clear stale buffered ICE
     const handleIncomingCall = (data) => {
       console.log('Incoming call received:', data);
+      if (data?.from) {
+        pendingCallIceRef.current[data.from] = [];
+      }
       setIncomingCall(data);
       if (data?.from) {
+        const callerEntry = {
+          id: data.from,
+          name: data.fromName || data.fromPhone || 'User',
+          avatar: data.fromAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+          phone: data.fromPhone || '',
+          online: true
+        };
         setContacts(prev => {
-          if (!prev.some(c => c.id === data.from)) {
-            return [{
-              id: data.from,
-              name: data.fromName || 'User',
-              avatar: data.fromAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
-              phone: data.fromPhone || '',
-              online: true
-            }, ...prev];
-          }
-          return prev;
+          const existing = prev.find(c => c.id === data.from);
+          if (!existing) return [callerEntry, ...prev];
+          return prev.map(c => c.id === data.from ? { ...c, phone: c.phone || callerEntry.phone, avatar: c.avatar || callerEntry.avatar, online: true } : c);
         });
+
+        if (currentUser?.id) {
+          const callChatId = `chat_${[currentUser.id, data.from].sort().join('_')}`;
+          const nowMs = Date.now();
+          setChatSummaries(prev => ({
+            ...prev,
+            [callChatId]: {
+              lastMessage: data.isVideo ? '📹 Incoming video call...' : '📞 Incoming audio call...',
+              timestamp: formatISTTime(new Date()),
+              rawTime: nowMs,
+              senderId: data.from,
+              senderName: data.fromName || data.fromPhone || 'User',
+              senderPhone: data.fromPhone || '',
+              senderAvatar: data.fromAvatar || '',
+              recipientId: currentUser.id,
+              status: 'delivered',
+              type: 'call_log'
+            }
+          }));
+        }
+      }
+    };
+
+    // Buffer incoming ICE candidates received while ringing (before ActiveCallModal mounts)
+    const handlePendingIceCandidate = (data) => {
+      if (!data?.candidate || !data?.from) return;
+      if (!active1on1CallRef.current || active1on1CallRef.current.targetId !== data.from) {
+        if (!pendingCallIceRef.current[data.from]) {
+          pendingCallIceRef.current[data.from] = [];
+        }
+        pendingCallIceRef.current[data.from].push(data.candidate);
       }
     };
 
@@ -465,17 +532,39 @@ export default function App() {
       if (!payload?.chatId || !payload?.message) return;
       const { chatId, message, senderUser } = payload;
       const rawTime = message.rawTime || (message.createdAt ? new Date(message.createdAt).getTime() : Date.now());
+      const previewText = (typeof message.text === 'string' && message.text.trim())
+        ? message.text
+        : message.type === 'image' ? '📷 Photo'
+        : message.type === 'video' ? '🎥 Video'
+        : (message.type === 'audio' || message.type === 'voice') ? '🎤 Voice message'
+        : (message.type === 'file' || message.type === 'document') ? (message.fileName ? `📄 ${message.fileName}` : '📄 Document')
+        : message.type === 'location' ? '📍 Location'
+        : message.type === 'contact' ? '👤 Contact'
+        : message.type === 'poll' ? '📊 Poll'
+        : message.type === 'call_log' ? '📞 Call'
+        : 'New message';
+
+      if (chatId.startsWith('group_') && !groupsRef.current.some(g => g.id === chatId || `group_${g.id}` === chatId)) {
+        fetch('/api/groups')
+          .then(res => res.json())
+          .then(data => { if (Array.isArray(data)) setGroups(data); })
+          .catch(() => {});
+      }
 
       setChatSummaries(prev => ({
         ...prev,
         [chatId]: {
-          lastMessage: message.text,
+          lastMessage: previewText,
           timestamp: message.timestamp,
           rawTime,
           senderId: message.senderId,
           senderName: message.senderName,
           senderPhone: message.senderPhone,
           senderAvatar: message.senderAvatar,
+          recipientId: message.recipientId || prev[chatId]?.recipientId || null,
+          recipientName: prev[chatId]?.recipientName || '',
+          recipientPhone: prev[chatId]?.recipientPhone || '',
+          recipientAvatar: prev[chatId]?.recipientAvatar || '',
           status: message.status,
           type: message.type
         }
@@ -483,7 +572,7 @@ export default function App() {
 
       // Incoming message from another user
       if (message.senderId !== currentUser?.id) {
-        // 1. Immediately ensure sender is in contacts so their conversation is shown right in the Chats list!
+        // 1. Immediately ensure sender is in contacts so their conversation is shown right in the All Chats list!
         const newContactInfo = senderUser || {
           id: message.senderId,
           name: message.senderName,
@@ -515,19 +604,18 @@ export default function App() {
           true
         );
 
-        // If user is NOT viewing this chat right now: increment unread & notify!
+        // If user is NOT viewing this chat right now: increment unread (strictly by chatId) & notify!
         if (!isViewingThisChat) {
           setUnreadCounts(prev => ({
             ...prev,
-            [chatId]: (prev[chatId] || 0) + 1,
-            [message.senderId]: (prev[message.senderId] || 0) + 1
+            [chatId]: (prev[chatId] || 0) + 1
           }));
 
           // Play urgent SOS or message chime + system tray notification
           if (message.isSos) {
-            notifyUrgentSos(senderDisplay, message.text);
+            notifyUrgentSos(senderDisplay, previewText);
           } else {
-            notifyIncomingMessage(senderDisplay, message.text, chatId);
+            notifyIncomingMessage(senderDisplay, previewText, chatId);
           }
 
           setIncomingAlert({
@@ -535,7 +623,7 @@ export default function App() {
             senderPhone: message.senderPhone,
             senderId: message.senderId,
             senderUser: newContactInfo,
-            text: message.text,
+            text: previewText,
             chatId
           });
           setTimeout(() => setIncomingAlert(null), 5000);
@@ -584,7 +672,17 @@ export default function App() {
       });
     };
 
+    // Close ringing modal cleanly if caller cancels before callee answers
+    const handleIncomingCallEnded = () => {
+      if (incomingCallRef.current?.from) {
+        delete pendingCallIceRef.current[incomingCallRef.current.from];
+        setIncomingCall(null);
+      }
+    };
+
     socket.on('incoming-call', handleIncomingCall);
+    socket.on('call-ended', handleIncomingCallEnded);
+    socket.on('ice-candidate', handlePendingIceCandidate);
     socket.on('incoming-call-invitation', handleCallInvitation);
     socket.on('user-status-changed', handleUserStatus);
     socket.on('user-registered', handleNewUser);
@@ -597,6 +695,8 @@ export default function App() {
 
     return () => {
       socket.off('incoming-call', handleIncomingCall);
+      socket.off('call-ended', handleIncomingCallEnded);
+      socket.off('ice-candidate', handlePendingIceCandidate);
       socket.off('incoming-call-invitation', handleCallInvitation);
       socket.off('user-status-changed', handleUserStatus);
       socket.off('user-registered', handleNewUser);
@@ -689,6 +789,17 @@ export default function App() {
   // Initiate Call (1-on-1 or Group)
   const handleStartCall = (chat, isVideo = false) => {
     if (chat.isGroup) {
+      const gChatId = chat.id.startsWith('group_') ? chat.id : `group_${chat.id}`;
+      setChatSummaries(prev => ({
+        ...prev,
+        [gChatId]: {
+          ...(prev[gChatId] || {}),
+          lastMessage: isVideo ? '📹 Group video call' : '📞 Group audio call',
+          timestamp: formatISTTime(new Date()),
+          rawTime: Date.now(),
+          type: 'call_log'
+        }
+      }));
       setActiveGroupCall({
         groupId: chat.id,
         groupName: chat.name,
@@ -696,6 +807,27 @@ export default function App() {
         isVideo
       });
     } else {
+      if (currentUser?.id && chat.id) {
+        pendingCallIceRef.current[chat.id] = [];
+        const callChatId = `chat_${[currentUser.id, chat.id].sort().join('_')}`;
+        setChatSummaries(prev => ({
+          ...prev,
+          [callChatId]: {
+            ...(prev[callChatId] || {}),
+            lastMessage: isVideo ? '📹 Calling video...' : '📞 Calling audio...',
+            timestamp: formatISTTime(new Date()),
+            rawTime: Date.now(),
+            senderId: currentUser.id,
+            senderName: currentUser.name,
+            senderPhone: currentUser.phone || '',
+            recipientId: chat.id,
+            recipientName: chat.name || chat.phone || 'User',
+            recipientPhone: chat.phone || '',
+            recipientAvatar: chat.avatar || '',
+            type: 'call_log'
+          }
+        }));
+      }
       // ActiveCallModal handles WebRTC SDP offer and emits 'call-user'
       setActive1on1Call({
         targetId: chat.id,
@@ -740,6 +872,7 @@ export default function App() {
         : (formattedDuration ? `📞 Voice call • ${formattedDuration}` : '📞 Missed voice call');
 
       const targetId = active1on1Call.targetId;
+      delete pendingCallIceRef.current[targetId];
       const chatId = `chat_${[currentUser?.id, targetId].sort().join('_')}`;
 
       // Insert Call Event Message directly into 1-on-1 Chat Room (WhatsApp style)
@@ -813,20 +946,30 @@ export default function App() {
     socket.emit('reject-call', { to: incomingCall.from });
 
     const targetId = incomingCall.from;
-    const chatId = `chat_${[currentUser?.id, targetId].sort().join('_')}`;
-    const callText = incomingCall.isVideo ? '📹 Missed video call' : '📞 Missed voice call';
-
-    socket.emit('send-message', {
-      chatId,
-      senderId: targetId,
-      senderName: incomingCall.fromName,
-      recipientId: currentUser?.id,
-      type: 'call_log',
-      text: callText,
-      mediaUrl: null,
-      timestamp: formatISTTime(new Date()),
-      encrypted: true
-    });
+    delete pendingCallIceRef.current[targetId];
+    if (currentUser?.id && targetId) {
+      const chatId = `chat_${[currentUser.id, targetId].sort().join('_')}`;
+      const callText = incomingCall.isVideo ? '📹 Missed video call' : '📞 Missed voice call';
+      setChatSummaries(prev => ({
+        ...prev,
+        [chatId]: {
+          lastMessage: callText,
+          timestamp: formatISTTime(new Date()),
+          rawTime: Date.now(),
+          senderId: targetId,
+          senderName: incomingCall.fromName || incomingCall.fromPhone || 'User',
+          senderPhone: incomingCall.fromPhone || '',
+          senderAvatar: incomingCall.fromAvatar || '',
+          recipientId: currentUser.id,
+          status: 'delivered',
+          type: 'call_log'
+        }
+      }));
+      setUnreadCounts(prev => ({
+        ...prev,
+        [chatId]: (prev[chatId] || 0) + 1
+      }));
+    }
 
     setIncomingCall(null);
   };
@@ -864,6 +1007,40 @@ export default function App() {
   // Search query normalization (moved before allChats to avoid reference error)
   const cleanSearch = searchQuery.trim().toLowerCase();
   const cleanDigits = searchQuery.replace(/\D/g, '');
+  const cleanDigitsLast10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+
+  // Home Search bar: exact 10+ digit registered user lookup so typing a full registered number finds them immediately
+  const [homeExactUser, setHomeExactUser] = useState(null);
+  const [homeExactLoading, setHomeExactLoading] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser?.id || cleanDigits.length < 10) {
+      setHomeExactUser(null);
+      setHomeExactLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setHomeExactLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/users/find-by-phone?phone=${encodeURIComponent(cleanDigits)}&viewerId=${encodeURIComponent(currentUser.id)}`
+        );
+        const data = await res.json();
+        if (!cancelled) {
+          setHomeExactUser(data?.found && data.user ? data.user : null);
+        }
+      } catch {
+        if (!cancelled) setHomeExactUser(null);
+      } finally {
+        if (!cancelled) setHomeExactLoading(false);
+      }
+    }, 180);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [cleanDigits, currentUser?.id]);
 
   // Helper to resolve partner user ID from `chat_<idA>_<idB>` cleanly (even when IDs contain '_')
   const extractPartnerId = (cId, selfId) => {
@@ -874,10 +1051,11 @@ export default function App() {
     return '';
   };
 
-  // 1. Collect all active 1-on-1 chat participants from chatSummaries and unread counts
+  // 1. Collect all active 1-on-1 chat participants from chatSummaries and unread counts (including calls & media)
   const activeChatUsersMap = new Map();
   Object.entries(chatSummaries).forEach(([cId, summary]) => {
-    if (cId.startsWith('chat_') && currentUser?.id && Boolean(summary?.lastMessage)) {
+    const hasActivity = Boolean(summary && (summary.lastMessage || summary.rawTime || summary.type));
+    if (cId.startsWith('chat_') && currentUser?.id && hasActivity) {
       const otherId = extractPartnerId(cId, currentUser.id);
       if (otherId) {
         activeChatUsersMap.set(otherId, { cChatId: cId, summary });
@@ -901,15 +1079,25 @@ export default function App() {
     }
   });
 
-  // 2. Build full 1-on-1 candidate list: contacts PLUS any other user with an active conversation thread!
+  // 2. Build full 1-on-1 candidate list: contacts PLUS any other user with an active conversation/call thread!
   const all1on1Candidates = [...contacts];
   activeChatUsersMap.forEach(({ cChatId, summary }, otherId) => {
     if (!all1on1Candidates.some(c => c.id === otherId)) {
+      const isOutgoingLast = summary?.senderId === currentUser?.id;
+      const resolvedName = isOutgoingLast
+        ? (summary?.recipientName || summary?.recipientPhone || '')
+        : (summary?.senderName && summary.senderName !== 'User' ? summary.senderName : (summary?.senderPhone || ''));
+      const resolvedPhone = isOutgoingLast
+        ? (summary?.recipientPhone || '')
+        : (summary?.senderPhone || '');
+      const resolvedAvatar = isOutgoingLast
+        ? (summary?.recipientAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80')
+        : (summary?.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80');
       all1on1Candidates.push({
         id: otherId,
-        name: summary?.senderId === otherId && summary?.senderName && summary.senderName !== 'User' ? summary.senderName : (summary?.senderPhone || ''),
-        phone: summary?.senderPhone || '',
-        avatar: summary?.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+        name: resolvedName,
+        phone: resolvedPhone,
+        avatar: resolvedAvatar,
         status: 'Available',
         online: true
       });
@@ -934,10 +1122,10 @@ export default function App() {
     ...all1on1Candidates
       .filter(c => {
         const cChatId = `chat_${[currentUser?.id, c.id].sort().join('_')}`;
-        const summary = chatSummaries[cChatId];
+        const summary = chatSummaries[cChatId] || activeChatUsersMap.get(c.id)?.summary;
         const unread = unreadCounts[cChatId] || unreadCounts[c.id] || 0;
-        const hasChat = activeChatUsersMap.has(c.id) || Boolean(summary?.lastMessage) || unread > 0;
-        // If searching in top bar, ONLY allow saved contacts or active chat history (strict privacy)
+        const hasChat = activeChatUsersMap.has(c.id) || Boolean(summary && (summary.lastMessage || summary.rawTime || summary.type)) || unread > 0;
+        // If searching in top bar, allow saved contacts or active chat/call history
         if (cleanSearch) {
           return hasChat || isSavedNumber(c.phone, savedContactsMap);
         }
@@ -947,9 +1135,10 @@ export default function App() {
         const cChatId = `chat_${[currentUser?.id, c.id].sort().join('_')}`;
         const summary = chatSummaries[cChatId] || activeChatUsersMap.get(c.id)?.summary;
         const unread = unreadCounts[cChatId] || unreadCounts[c.id] || 0;
+        const isOutgoingLast = summary?.senderId === currentUser?.id;
         return {
           ...c,
-          phone: c.phone || summary?.senderPhone || '',
+          phone: c.phone || (isOutgoingLast ? summary?.recipientPhone : summary?.senderPhone) || '',
           isGroup: false,
           lastMessage: summary?.lastMessage || 'Tap to chat',
           lastMessageStatus: summary?.status,
@@ -985,7 +1174,10 @@ export default function App() {
     const nameMatch = chat.name?.toLowerCase().includes(cleanSearch) || resolvedName.includes(cleanSearch);
     const phoneRawMatch = chat.phone?.toLowerCase().includes(cleanSearch);
     const chatDigits = (chat.phone || '').replace(/\D/g, '');
-    const phoneDigitsMatch = cleanDigits.length > 0 && chatDigits.includes(cleanDigits);
+    const phoneDigitsMatch = cleanDigits.length > 0 && (
+      chatDigits.includes(cleanDigits) ||
+      (cleanDigitsLast10.length >= 10 && chatDigits.endsWith(cleanDigitsLast10))
+    );
     return nameMatch || phoneRawMatch || phoneDigitsMatch;
   });
 
@@ -1257,9 +1449,28 @@ export default function App() {
                         />
                       );
                     })}
-                    {filteredChats.length === 0 && (
+                    {cleanDigits.length >= 10 && homeExactUser && !filteredChats.some(c => c.id === homeExactUser.id) && (
+                      <ChatListItem
+                        key={`exact_${homeExactUser.id}`}
+                        chat={{
+                          ...homeExactUser,
+                          isGroup: false,
+                          lastMessage: 'Registered on GlassChat • Tap to chat',
+                          timestamp: 'Match',
+                          unreadCount: 0
+                        }}
+                        onSelectChat={handleSelectChat}
+                        onStartCall={handleStartCall}
+                        currentUser={currentUser}
+                        savedContactsMap={savedContactsMap}
+                        typingText=""
+                      />
+                    )}
+                    {filteredChats.length === 0 && !homeExactUser && (
                       <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-secondary)' }}>
-                        <p style={{ fontSize: '14px', fontWeight: '500' }}>No conversations found</p>
+                        <p style={{ fontSize: '14px', fontWeight: '500' }}>
+                          {homeExactLoading ? 'Searching registered numbers...' : 'No conversations found'}
+                        </p>
                         <button 
                           onClick={() => setIsNewChatOpen(true)}
                           className="glass-pill"
@@ -1339,6 +1550,8 @@ export default function App() {
             contacts={contacts}
             savedContacts={savedContacts}
             savedContactsMap={savedContactsMap}
+            pendingIceCandidates={pendingCallIceRef.current[active1on1Call.targetId] || []}
+            onConsumePendingIce={consumePendingIceCandidates}
           />
         )}
 
@@ -1428,10 +1641,14 @@ export default function App() {
           <NewChatModal
             contacts={contacts}
             currentUserId={currentUser?.id}
+            currentUser={currentUser}
             chatSummaries={chatSummaries}
             onClose={() => setIsNewChatOpen(false)}
             onSelectContact={(contact) => {
               setIncomingAlert(null);
+              if (contact?.id) {
+                setContacts(prev => prev.some(c => c.id === contact.id) ? prev : [contact, ...prev]);
+              }
               setSelectedChat(contact);
               setIsNewChatOpen(false);
             }}

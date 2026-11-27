@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DB_FILE = path.join(__dirname, 'database.json');
+const DB_BAK_FILE = path.join(__dirname, 'database.json.bak');
+const DB_TMP_FILE = path.join(__dirname, 'database.json.tmp');
 
 // Clean initial data - ZERO dummy data
 const defaultSeed = {
@@ -20,28 +22,48 @@ const defaultSeed = {
   callRecordings: []
 };
 
-// Load data from disk or initialize fresh
+function parseDbFile(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  if (!raw || !raw.trim()) return null;
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    users: parsed.users || [],
+    groups: parsed.groups || [],
+    messages: parsed.messages || {},
+    calls: parsed.calls || [],
+    statuses: parsed.statuses || [],
+    scheduledMessages: parsed.scheduledMessages || [],
+    chatSettings: parsed.chatSettings || {},
+    reports: parsed.reports || [],
+    blockedRelations: parsed.blockedRelations || {},
+    callRecordings: parsed.callRecordings || []
+  };
+}
+
+// Load data from disk with automatic backup recovery (NEVER wipes history on corrupt file)
 function loadDatabase() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, 'utf-8');
-      const parsed = JSON.parse(raw);
-      console.log(`📦 Loaded database with ${parsed.users?.length || 0} real users.`);
-      return {
-        users: parsed.users || [],
-        groups: parsed.groups || [],
-        messages: parsed.messages || {},
-        calls: parsed.calls || [],
-        statuses: parsed.statuses || [],
-        scheduledMessages: parsed.scheduledMessages || [],
-        chatSettings: parsed.chatSettings || {},
-        reports: parsed.reports || [],
-        blockedRelations: parsed.blockedRelations || {},
-        callRecordings: parsed.callRecordings || []
-      };
+  for (const candidate of [DB_FILE, DB_BAK_FILE, DB_TMP_FILE]) {
+    try {
+      const parsed = parseDbFile(candidate);
+      if (parsed) {
+        console.log(`📦 Loaded database (${path.basename(candidate)}) with ${parsed.users.length} real users.`);
+        if (candidate !== DB_FILE) {
+          try {
+            fs.writeFileSync(DB_FILE, JSON.stringify(parsed), 'utf-8');
+          } catch {}
+        }
+        return parsed;
+      }
+    } catch (err) {
+      console.error(`Failed to parse ${path.basename(candidate)}:`, err);
+      if (candidate === DB_FILE && fs.existsSync(DB_FILE)) {
+        try {
+          fs.copyFileSync(DB_FILE, `${DB_FILE}.corrupt.${Date.now()}`);
+        } catch {}
+      }
     }
-  } catch (err) {
-    console.error('Failed to read database.json, initializing fresh clean store:', err);
   }
 
   try {
@@ -92,7 +114,12 @@ async function flushAsync() {
   }
   writeInFlight = true;
   try {
-    await fs.promises.writeFile(DB_FILE, buildSnapshot(), 'utf-8');
+    const snapshot = buildSnapshot();
+    await fs.promises.writeFile(DB_TMP_FILE, snapshot, 'utf-8');
+    if (fs.existsSync(DB_FILE)) {
+      try { await fs.promises.copyFile(DB_FILE, DB_BAK_FILE); } catch {}
+    }
+    await fs.promises.rename(DB_TMP_FILE, DB_FILE);
   } catch (err) {
     console.error('Failed async write to database.json:', err);
   } finally {
@@ -120,7 +147,12 @@ export function saveDatabaseSync() {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    fs.writeFileSync(DB_FILE, buildSnapshot(), 'utf-8');
+    const snapshot = buildSnapshot();
+    fs.writeFileSync(DB_TMP_FILE, snapshot, 'utf-8');
+    if (fs.existsSync(DB_FILE)) {
+      try { fs.copyFileSync(DB_FILE, DB_BAK_FILE); } catch {}
+    }
+    fs.renameSync(DB_TMP_FILE, DB_FILE);
   } catch (err) {
     console.error('Failed sync write to database.json:', err);
   }

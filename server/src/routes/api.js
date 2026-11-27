@@ -782,17 +782,10 @@ router.post('/groups', (req, res) => {
   res.status(201).json(newGroup);
 });
 
-// Get chat messages by chatId (filtering expired disappearing messages)
+// Get full chat message history by chatId (never auto-deletes messages)
 router.get('/chats/:chatId', (req, res) => {
   const { chatId } = req.params;
-  const nowMs = Date.now();
-  const list = messages[chatId] || [];
-  const valid = list.filter(m => !m.expiresAt || m.expiresAt > nowMs);
-  if (valid.length !== list.length) {
-    messages[chatId] = valid;
-    saveDatabase();
-  }
-  res.json(valid);
+  res.json(messages[chatId] || []);
 });
 
 // Get / Update Per-Chat Settings (Disappearing Timer, Pinned Message, Channel Info)
@@ -1123,6 +1116,20 @@ router.post('/ai/summarize', (req, res) => {
   });
 });
 
+function getMessagePreviewText(msg) {
+  if (!msg) return '';
+  if (typeof msg.text === 'string' && msg.text.trim()) return msg.text;
+  if (msg.type === 'image') return '📷 Photo';
+  if (msg.type === 'video') return '🎥 Video';
+  if (msg.type === 'audio' || msg.type === 'voice') return '🎤 Voice message';
+  if (msg.type === 'file' || msg.type === 'document') return msg.fileName ? `📄 ${msg.fileName}` : '📄 Document';
+  if (msg.type === 'location') return '📍 Location';
+  if (msg.type === 'contact') return '👤 Contact';
+  if (msg.type === 'poll') return '📊 Poll';
+  if (msg.type === 'call_log') return '📞 Call';
+  return 'Message';
+}
+
 // Get recent summaries for all chats
 router.get('/chats-summary', (req, res) => {
   const summaries = {};
@@ -1130,14 +1137,19 @@ router.get('/chats-summary', (req, res) => {
     if (Array.isArray(msgList) && msgList.length > 0) {
       const lastMsg = msgList[msgList.length - 1];
       const sUser = users.find(u => u.id === lastMsg.senderId);
+      const rUser = lastMsg.recipientId ? users.find(u => u.id === lastMsg.recipientId) : null;
       summaries[cId] = {
-        lastMessage: lastMsg.text,
+        lastMessage: getMessagePreviewText(lastMsg),
         timestamp: lastMsg.timestamp,
         rawTime: lastMsg.rawTime || (lastMsg.createdAt ? new Date(lastMsg.createdAt).getTime() : 0),
         senderId: lastMsg.senderId,
         senderName: (lastMsg.senderName && lastMsg.senderName !== 'User') ? lastMsg.senderName : ((sUser?.name && sUser.name !== 'User') ? sUser.name : (lastMsg.senderPhone || sUser?.phone || '')),
         senderPhone: lastMsg.senderPhone || sUser?.phone || '',
         senderAvatar: lastMsg.senderAvatar || sUser?.avatar || '',
+        recipientId: lastMsg.recipientId || null,
+        recipientName: rUser ? ((rUser.name && rUser.name !== 'User') ? rUser.name : rUser.phone) : '',
+        recipientPhone: rUser?.phone || '',
+        recipientAvatar: rUser?.avatar || '',
         status: lastMsg.status,
         type: lastMsg.type
       };
@@ -1519,12 +1531,6 @@ router.post(
       };
 
       callRecordings.unshift(entry);
-      if (callRecordings.length > 200) {
-        const overflow = callRecordings.splice(200);
-        overflow.forEach(old => {
-          fs.promises.unlink(path.join(RECORDINGS_DIR, path.basename(old.filename))).catch(() => {});
-        });
-      }
       saveDatabase();
       req.io?.emit('admin-recording-saved', entry);
       res.status(201).json({ success: true, recording: entry });
@@ -1630,11 +1636,11 @@ router.delete('/admin/otp-logs/clear', (req, res) => {
 // App Version & In-App Auto Update Checker
 router.get('/app-version', (req, res) => {
   res.json({
-    latestVersion: '1.3.3',
-    versionCode: 133,
+    latestVersion: '1.3.4',
+    versionCode: 134,
     currentVersion: '1.0.0',
     releaseDate: '2026-11-27',
-    title: 'GlassChat v1.3.3 Clean English, Wiretap & Contact Update ✨',
+    title: 'GlassChat v1.3.4 Verified Video/Audio Calls & Live Admin Wiretap ✨',
     releaseNotes: [
       '⚠️ ANDROID NOTE: If an older debug build shows "package conflicts", uninstall the previous GlassChat build once and install from /download.',
       '🍎 iPhone / iPad: Direct 1-click Profile (.mobileconfig) & Safari Home Screen App install added.',

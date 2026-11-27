@@ -239,29 +239,40 @@ export default function NewChatModal({
     return Boolean(chatSummaries[cChatId]?.lastMessage);
   });
 
-  // Filtered lists during search (ONLY searches YOUR saved contacts + active chats — NEVER leaks strangers!)
+  // Filtered lists during search (matches both full digits and last 10 digits so +91 / 0 prefixes always match)
+  const searchLast10 = getLast10(cleanDigits);
+  const matchesDigits = (rawPhone) => {
+    if (!cleanDigits) return false;
+    const digits = normalizeDigits(rawPhone);
+    const phoneLast10 = getLast10(rawPhone);
+    if (digits.includes(cleanDigits)) return true;
+    if (searchLast10.length >= 10 && (digits.endsWith(searchLast10) || phoneLast10 === searchLast10)) return true;
+    return false;
+  };
+
   const filteredRegisteredSaved = cleanSearch
     ? registeredSavedUsers.filter(c => {
         const dName = (c.displayName || '').toLowerCase();
-        const digits = normalizeDigits(c.phone);
         return dName.includes(cleanSearch) ||
           (c.phone || '').toLowerCase().includes(cleanSearch) ||
-          (cleanDigits.length > 0 && digits.includes(cleanDigits));
+          matchesDigits(c.phone);
       })
     : registeredSavedUsers;
 
   const filteredUnregisteredSaved = cleanSearch
     ? unregisteredSavedContacts.filter(sc => {
         const name = (sc.name || '').toLowerCase();
-        const digits = normalizeDigits(sc.cleanDigits || sc.phone);
         return name.includes(cleanSearch) ||
           (sc.phone || '').toLowerCase().includes(cleanSearch) ||
-          (cleanDigits.length > 0 && digits.includes(cleanDigits));
+          matchesDigits(sc.cleanDigits || sc.phone);
       })
     : unregisteredSavedContacts;
 
-  // Exact match user for full 10-digit search (when not already in saved registered list)
-  const exactFoundUser = (!isFamilyContactLock && exactLookupResult?.found && exactLookupResult.user && !matchedRegisteredIds.has(exactLookupResult.user.id))
+  // Exact match user for full 10-digit search (always show if registered & not already visible in filteredRegisteredSaved)
+  const exactFoundUser = (!isFamilyContactLock &&
+    exactLookupResult?.found &&
+    exactLookupResult.user &&
+    !filteredRegisteredSaved.some(u => u.id === exactLookupResult.user.id))
     ? exactLookupResult.user
     : null;
 
